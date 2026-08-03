@@ -1,0 +1,90 @@
+{
+  "device": {
+    "name": "Creator Micro 2 Pro",
+    "inputMode": "shortcut"
+  },
+  "settings": {
+    "captureReleases": true,
+    "ignoreAutoRepeat": true
+  },
+  "commands": [
+    {
+      "id": "creator.k01",
+      "label": "Creator K01",
+      "keyCode": 105,
+      "modifiers": ["control", "option", "command"]
+    },
+    {
+      "id": "creator.k02",
+      "label": "Creator K02",
+      "keyCode": 107,
+      "modifiers": ["control", "option", "command"]
+    },
+    {
+      "id": "creator.k03",
+      "label": "Creator K03",
+      "keyCode": 113,
+      "modifiers": ["control", "option", "command"]
+    },
+    {
+      "id": "creator.k04",
+      "label": "Creator K04",
+      "keyCode": 106,
+      "modifiers": ["control", "option", "command"]
+    },
+    {
+      "id": "creator.k05",
+      "label": "Creator K05",
+      "keyCode": 64,
+      "modifiers": ["control", "option", "command"]
+    },
+    {
+      "id": "creator.k06",
+      "label": "Creator K06",
+      "keyCode": 79,
+      "modifiers": ["control", "option", "command"]
+    },
+    {
+      "id": "creator.k07",
+      "label": "Creator K07",
+      "keyCode": 80,
+      "modifiers": ["control", "option", "command"]
+    },
+    {
+      "id": "creator.k08",
+      "label": "Creator K08",
+      "keyCode": 90,
+      "modifiers": ["control", "option", "command"]
+    },
+    {
+      "id": "creator.k09",
+      "label": "Creator K09",
+      "keyCode": 105,
+      "modifiers": ["control", "option", "command", "shift"]
+    },
+    {
+      "id": "creator.k10",
+      "label": "Creator K10",
+      "keyCode": 107,
+      "modifiers": ["control", "option", "command", "shift"]
+    },
+    {
+      "id": "creator.k11",
+      "label": "Creator K11",
+      "keyCode": 113,
+      "modifiers": ["control", "option", "command", "shift"]
+    },
+    {
+      "id": "creator.k12",
+      "label": "Creator K12",
+      "keyCode": 106,
+      "modifiers": ["control", "option", "command", "shift"]
+    },
+    {
+      "id": "creator.k13",
+      "label": "Creator K13",
+      "keyCode": 64,
+      "modifiers": ["control", "option", "command", "shift"]
+    }
+  ]
+}
