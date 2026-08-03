@@ -53,6 +53,37 @@ This runs:
 build/thumosd --hid-record --hid-product Creator
 ```
 
+## macOS App
+
+Build the macOS app:
+
+```sh
+make app
+```
+
+Open it:
+
+```sh
+make open-ui
+```
+
+ThumOS opens as a normal macOS app and also appears in the menu bar.
+
+- The main window has a `Recording` switch and data controls.
+- The menu-bar item opens a compact popover with the same switch.
+- Closing the window hides it; the app keeps running.
+- Quitting ThumOS from the app menu exits the UI, so the menu-bar item disappears.
+- Recording is controlled by the app. Turning it on starts a small bundled `thumosd` recorder process; turning it off stops that process.
+- `Show Data` opens a read-only view of recent events.
+- `Export CSV` saves the event log to a CSV file.
+- `Clear Events` deletes recorded rows from the local database.
+
+The app bundle includes its own copy of `thumosd` at:
+
+```text
+build/ThumOS.app/Contents/MacOS/thumosd
+```
+
 ## Shortcut Fallback
 
 In Work Louder Input, map the Creator buttons to the shortcuts in `config/creator-micro-2.json`.
@@ -71,7 +102,7 @@ build/thumosd --print-events
 
 macOS must grant Accessibility permission before global shortcut monitoring works. HID recording does not use this shortcut fallback.
 
-## Run In The Background
+## Optional LaunchAgent
 
 ```sh
 make install-launch-agent
@@ -85,11 +116,25 @@ Logs are written to:
 - `~/Library/Logs/ThumOS/thumosd.out.log`
 - `~/Library/Logs/ThumOS/thumosd.err.log`
 
+The LaunchAgent path is optional. The macOS app does not need it for normal recording.
+
 ## Inspect Events
 
 ```sh
 sqlite3 "$HOME/Library/Application Support/ThumOS/events.sqlite3" \
   "select occurred_at_utc, source, device_name, command_id, event_type from input_events order by id desc limit 20;"
+```
+
+The event database lives at:
+
+```text
+~/Library/Application Support/ThumOS/events.sqlite3
+```
+
+Clear recorded events:
+
+```sh
+make clear-events
 ```
 
 ## Later UI

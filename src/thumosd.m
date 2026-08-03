@@ -906,7 +906,7 @@ static void THHIDValueCallback(void *context, IOReturn result, void *sender, IOH
     }
 
     CFIndex integerValue = IOHIDValueGetIntegerValue(value);
-    NSString *eventType = integerValue == 0 ? @"release" : (integerValue == 1 ? @"press" : @"value");
+    NSString *eventType = integerValue == 0 ? @"release" : @"press";
     NSString *usageName = THHIDUsageName(usagePage, usage);
     NSString *deviceName = THHIDDeviceName(device);
     NSNumber *vendorID = THHIDNumberProperty(device, kIOHIDVendorIDKey) ?: @-1;
@@ -928,7 +928,7 @@ static void THHIDValueCallback(void *context, IOReturn result, void *sender, IOH
         @"hidTimestamp": @(IOHIDValueGetTimeStamp(value))
     });
 
-    if (_printEvents) {
+    if (_printEvents && (!_recordEvents || integerValue != 0)) {
         THPrint([NSString stringWithFormat:@"hid %@ device=\"%@\" vendorID=%@ productID=%@ locationID=%@ usagePage=0x%02x usage=0x%02x name=%@ value=%ld",
                                            eventType,
                                            deviceName,
@@ -942,6 +942,10 @@ static void THHIDValueCallback(void *context, IOReturn result, void *sender, IOH
     }
 
     if (!_recordEvents) {
+        return;
+    }
+
+    if (integerValue == 0) {
         return;
     }
 
