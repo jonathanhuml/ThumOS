@@ -69,17 +69,16 @@ make open-ui
 
 ThumOS opens as a normal macOS app and also appears in the menu bar.
 
-- The main window has a `Creator Recording` switch, Muse controls, and data controls.
+- The main window has a `Session Recording` switch, Muse controls, output-folder selection, a session dropdown, and waveform viewing.
 - The menu-bar item opens a compact popover with the same recording controls.
 - Closing the window hides it; the app keeps running.
 - Quitting ThumOS from the app menu exits the UI, so the menu-bar item disappears.
-- Recording is controlled by the app. Turning it on starts an in-process Creator HID monitor; turning it off closes that monitor.
+- Recording is controlled by the app. Turning it on creates one session folder and starts an in-process Creator HID monitor plus Muse EEG when Muse is connected.
 - macOS must allow ThumOS in `System Settings > Privacy & Security > Input Monitoring` for Creator Recording.
-- `Show Data` opens a read-only view of recent events.
-- `Export CSV` saves the event log to a CSV file.
-- `Clear Events` deletes recorded rows from the local database.
+- `Show Data` opens a read-only view of the selected session's Creator events.
+- `Export CSV` saves the selected session's Creator events to a CSV file.
 - `Connect Muse` uses native CoreBluetooth to find and prepare a Muse headset.
-- `EEG Recording` starts the Muse EEG stream and writes raw EEG to CSV only while that switch is on.
+- `View Waveform` draws the selected session's Muse EEG with Creator annotations.
 
 The app bundle includes its own copy of `thumosd` for command-line diagnostics at:
 
@@ -87,11 +86,18 @@ The app bundle includes its own copy of `thumosd` for command-line diagnostics a
 build/ThumOS.app/Contents/MacOS/thumosd
 ```
 
-EEG recording CSVs are saved to:
+Session folders are saved under the selected output folder. The default is:
 
 ```text
-~/Library/Application Support/ThumOS/eeg-recordings/
+~/Documents/ThumOS Sessions/
 ```
+
+Each session folder contains:
+
+- `creator-events.csv`
+- `muse-eeg.csv`
+- `annotations.csv`
+- `session.json`
 
 The Muse connector uses the ZUNA WebBluetooth Muse constants:
 
@@ -100,17 +106,14 @@ The Muse connector uses the ZUNA WebBluetooth Muse constants:
 - EEG channels `TP9`, `AF7`, `AF8`, `TP10`
 - ZUNA's Muse packet decoder, saved as one CSV row per decoded channel sample
 
-## Creator EEG Toggle Button
+## Creator Annotations
 
-The app currently watches for a physical Creator HID chord of `Control + C + E` and toggles EEG recording when that chord appears. This is read from the Creator HID event log, not from a global keyboard shortcut, so a normal keyboard chord should not toggle EEG.
+During a session, ThumOS annotates Creator HID sequences:
 
-Creator Recording must be on for this button to work. If the Work Louder command emits a different HID sequence than `keyboard.0xe0` or `keyboard.0xe4` plus `keyboard.c` and `keyboard.e`, run:
-
-```sh
-make discover-hid
-```
-
-Press that Creator key once and use the printed HID usages to adjust the trigger mapping.
+- `keyboard.return` -> `yes`
+- `keyboard.down-arrow`, `keyboard.down-arrow`, `keyboard.return` -> `no`
+- `keyboard.down-arrow`, `keyboard.return` -> `allow permission`
+- `command` + `keyboard.right-arrow` alternates `talk start` and `talk end`
 
 ## Shortcut Fallback
 

@@ -220,11 +220,6 @@ static NSString *THLogDirectory(void) {
     return THExpandTilde(@"~/Library/Logs/ThumOS");
 }
 
-static NSString *THActiveAppBundleID(void) {
-    NSRunningApplication *application = [[NSWorkspace sharedWorkspace] frontmostApplication];
-    return application.bundleIdentifier ?: @"";
-}
-
 static NSString *THJSONString(NSDictionary *payload) {
     NSData *data = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
     if (data == nil) {
@@ -448,58 +443,6 @@ static NSString *THDatabasePath(void) {
     return [THApplicationSupportDirectory() stringByAppendingPathComponent:@"events.sqlite3"];
 }
 
-static NSString *THRunSQLite(NSArray<NSString *> *arguments) {
-    NSString *databasePath = THDatabasePath();
-    if (![[NSFileManager defaultManager] fileExistsAtPath:databasePath]) {
-        return @"";
-    }
-
-    NSMutableArray<NSString *> *taskArguments = [NSMutableArray arrayWithArray:arguments];
-    if (taskArguments.count == 0) {
-        [taskArguments addObject:databasePath];
-    } else {
-        [taskArguments insertObject:databasePath atIndex:taskArguments.count - 1];
-    }
-    THTaskResult *result = THRunTask(@"/usr/bin/sqlite3", taskArguments);
-    if (result.status != 0) {
-        return result.output.length > 0 ? result.output : @"Could not read events.";
-    }
-
-    return result.output;
-}
-
-static NSString *THRecentEventsText(void) {
-    NSString *databasePath = THDatabasePath();
-    if (![[NSFileManager defaultManager] fileExistsAtPath:databasePath]) {
-        return @"No data recorded yet.";
-    }
-
-    NSString *query =
-        @"select occurred_at_utc as time, device_name as device, command_id as command, event_type as event "
-         "from input_events "
-         "where source = 'hid' "
-         "order by id desc "
-         "limit 200;";
-    NSString *output = THRunSQLite(@[@"-header", @"-column", query]);
-    NSString *trimmed = [output stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    return trimmed.length > 0 ? output : @"No data recorded yet.";
-}
-
-static NSString *THEventsCSVText(void) {
-    NSString *query =
-        @"select occurred_at_utc as time, source, device_name as device, command_id as command, event_type as event, active_app_bundle_id as active_app "
-         "from input_events "
-         "where source = 'hid' "
-         "order by id;";
-    return THRunSQLite(@[@"-header", @"-csv", query]);
-}
-
-static NSString *THDefaultExportFilename(void) {
-    NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
-    formatter.dateFormat = @"yyyy-MM-dd-HHmmss";
-    return [NSString stringWithFormat:@"thumos-events-%@.csv", [formatter stringFromDate:[NSDate date]]];
-}
-
 static NSString *THCSVField(NSString *value) {
     NSString *safeValue = value ?: @"";
     NSString *escapedValue = [safeValue stringByReplacingOccurrencesOfString:@"\"" withString:@"\"\""];
@@ -543,6 +486,7 @@ static NSString *THCSVField(NSString *value) {
 @property(nonatomic, copy) NSString *recordingStatusOverride;
 @property(nonatomic, copy) NSString *sessionsRootPath;
 @property(nonatomic, copy) NSString *currentSessionDirectory;
+@property(nonatomic, copy) NSString *lastFinishedSessionDirectory;
 @property(nonatomic, strong) NSFileHandle *creatorEventsFileHandle;
 @property(nonatomic, strong) NSFileHandle *annotationsFileHandle;
 @property(nonatomic, strong) NSMutableArray<NSDictionary *> *creatorRecentCommands;
@@ -553,6 +497,11 @@ static NSString *THCSVField(NSString *value) {
 @property(nonatomic) BOOL eegRecording;
 @property(nonatomic) BOOL talkOpen;
 - (void)handleCreatorHIDValue:(IOHIDValueRef)value result:(IOReturn)result;
+- (void)refreshSessionListSelectingPath:(NSString *)preferredPath;
+- (NSString *)sessionDirectoryForActions;
+- (BOOL)sessionDirectoryHasData:(NSString *)path;
+- (void)openSelectedSessionFolder:(id)sender;
+- (void)startEEGRecording;
 @end
 
 static void THCreatorHIDValueCallback(void *context, IOReturn result, void *sender, IOHIDValueRef value) {
@@ -659,34 +608,64 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
     [self refreshSessionList:nil];
 }
 
-- (NSArray<NSString *> *)sessionDirectories {
-    if (self.sessionsRootPath.length == 0) {
-        return @[];
+- (BOOL)sessionDirectoryHasData:(NSString *)path {
+    if (path.length == 0) {
+        return NO;
     }
 
-    NSArray<NSString *> *items = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:self.sessionsRootPath error:nil];
-    NSMutableArray<NSString *> *sessions = [NSMutableArray array];
+    BOOL isDirectory = NO;
+    if (![[NSFileManager defaultManager] fileExistsAtPath:path isDirectory:&isDirectory] || !isDirectory) {
+        return NO;
+    }
+
+    NSString *musePath = [path stringByAppendingPathComponent:THMuseEventsFilename()];
+    NSString *creatorPath = [path stringByAppendingPathComponent:THCreatorEventsFilename()];
+    NSString *annotationsPath = [path stringByAppendingPathComponent:THAnnotationsFilename()];
+    return [[NSFileManager defaultManager] fileExistsAtPath:musePath] ||
+           [[NSFileManager defaultManager] fileExistsAtPath:creatorPath] ||
+           [[NSFileManager defaultManager] fileExistsAtPath:annotationsPath];
+}
+
+- (void)addSessionDirectoriesFromRoot:(NSString *)root toSet:(NSMutableSet<NSString *> *)sessions {
+    NSString *standardRoot = [[root stringByExpandingTildeInPath] stringByStandardizingPath];
+    if (standardRoot.length == 0) {
+        return;
+    }
+
+    NSArray<NSString *> *items = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:standardRoot error:nil];
     for (NSString *item in items) {
-        NSString *path = [self.sessionsRootPath stringByAppendingPathComponent:item];
-        BOOL isDirectory = NO;
-        if ([[NSFileManager defaultManager] fileExistsAtPath:path isDirectory:&isDirectory] && isDirectory) {
-            NSString *musePath = [path stringByAppendingPathComponent:THMuseEventsFilename()];
-            NSString *creatorPath = [path stringByAppendingPathComponent:THCreatorEventsFilename()];
-            if ([[NSFileManager defaultManager] fileExistsAtPath:musePath] ||
-                [[NSFileManager defaultManager] fileExistsAtPath:creatorPath]) {
-                [sessions addObject:path];
-            }
+        NSString *path = [[standardRoot stringByAppendingPathComponent:item] stringByStandardizingPath];
+        if ([self sessionDirectoryHasData:path]) {
+            [sessions addObject:path];
         }
     }
+}
 
-    return [sessions sortedArrayUsingComparator:^NSComparisonResult(NSString *first, NSString *second) {
+- (NSArray<NSString *> *)sessionDirectories {
+    NSMutableSet<NSString *> *sessions = [NSMutableSet set];
+    [self addSessionDirectoriesFromRoot:self.sessionsRootPath toSet:sessions];
+    [self addSessionDirectoriesFromRoot:THDefaultSessionsRootDirectory() toSet:sessions];
+
+    NSString *lastFinished = [self.lastFinishedSessionDirectory stringByStandardizingPath];
+    if ([self sessionDirectoryHasData:lastFinished]) {
+        [sessions addObject:lastFinished];
+    }
+
+    return [sessions.allObjects sortedArrayUsingComparator:^NSComparisonResult(NSString *first, NSString *second) {
         return [[second lastPathComponent] compare:[first lastPathComponent]];
     }];
 }
 
 - (void)refreshSessionList:(id)sender {
     (void)sender;
+    [self refreshSessionListSelectingPath:nil];
+}
+
+- (void)refreshSessionListSelectingPath:(NSString *)preferredPath {
+    NSString *previousSelection = preferredPath ?: [self selectedSessionDirectory] ?: self.lastFinishedSessionDirectory;
+    NSString *standardPreviousSelection = [previousSelection stringByStandardizingPath];
     [self.windowSessionPopup removeAllItems];
+
     NSArray<NSString *> *sessions = [self sessionDirectories];
     if (sessions.count == 0) {
         [self.windowSessionPopup addItemWithTitle:@"No sessions"];
@@ -695,10 +674,197 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
     }
 
     self.windowSessionPopup.enabled = YES;
+    BOOL selectedPreferred = NO;
     for (NSString *path in sessions) {
         [self.windowSessionPopup addItemWithTitle:path.lastPathComponent];
         self.windowSessionPopup.lastItem.representedObject = path;
+        if (!selectedPreferred &&
+            standardPreviousSelection.length > 0 &&
+            [[path stringByStandardizingPath] isEqualToString:standardPreviousSelection]) {
+            [self.windowSessionPopup selectItem:self.windowSessionPopup.lastItem];
+            selectedPreferred = YES;
+        }
     }
+}
+
+- (NSString *)selectedSessionDirectory {
+    id representedObject = self.windowSessionPopup.selectedItem.representedObject;
+    return [representedObject isKindOfClass:[NSString class]] ? representedObject : nil;
+}
+
+- (NSString *)sessionDirectoryForActions {
+    NSString *selected = [self selectedSessionDirectory];
+    if ([self sessionDirectoryHasData:selected]) {
+        return selected;
+    }
+    if ([self sessionDirectoryHasData:self.currentSessionDirectory]) {
+        return self.currentSessionDirectory;
+    }
+    if ([self sessionDirectoryHasData:self.lastFinishedSessionDirectory]) {
+        return self.lastFinishedSessionDirectory;
+    }
+    return nil;
+}
+
+- (NSDate *)dateFromISOString:(NSString *)string formatter:(NSISO8601DateFormatter *)formatter {
+    if (string.length == 0) {
+        return nil;
+    }
+    return [formatter dateFromString:string];
+}
+
+- (BOOL)loadWaveformSession:(NSString *)sessionDirectory message:(NSString **)message {
+    NSString *musePath = [sessionDirectory stringByAppendingPathComponent:THMuseEventsFilename()];
+    NSString *annotationsPath = [sessionDirectory stringByAppendingPathComponent:THAnnotationsFilename()];
+    NSString *museText = [NSString stringWithContentsOfFile:musePath encoding:NSUTF8StringEncoding error:nil];
+    if (museText.length == 0) {
+        if (message != NULL) {
+            *message = @"Selected session has no Muse EEG CSV.";
+        }
+        return NO;
+    }
+
+    NSArray<NSString *> *lines = [museText componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
+    NSUInteger sampleLineCount = lines.count > 0 ? lines.count - 1 : 0;
+    NSUInteger stride = MAX((NSUInteger)1, sampleLineCount / 80000);
+    NSMutableArray<NSDictionary *> *samples = [NSMutableArray array];
+    NSMutableOrderedSet<NSString *> *channels = [NSMutableOrderedSet orderedSet];
+    NSISO8601DateFormatter *formatter = [[NSISO8601DateFormatter alloc] init];
+    formatter.formatOptions = NSISO8601DateFormatWithInternetDateTime | NSISO8601DateFormatWithFractionalSeconds;
+    formatter.timeZone = [NSTimeZone timeZoneForSecondsFromGMT:0];
+
+    NSDate *startDate = nil;
+    NSDate *endDate = nil;
+    for (NSUInteger index = 1; index < lines.count; index++) {
+        NSString *line = lines[index];
+        if (line.length == 0 || (index % stride) != 0) {
+            continue;
+        }
+
+        NSArray<NSString *> *columns = [line componentsSeparatedByString:@","];
+        if (columns.count < 6) {
+            continue;
+        }
+
+        NSDate *sampleDate = [self dateFromISOString:columns[1] formatter:formatter];
+        if (sampleDate == nil) {
+            continue;
+        }
+        if (startDate == nil) {
+            startDate = sampleDate;
+        }
+        endDate = sampleDate;
+        NSString *channel = columns[3];
+        [channels addObject:channel];
+        NSTimeInterval seconds = [sampleDate timeIntervalSinceDate:startDate];
+        [samples addObject:@{@"seconds": @(MAX(0.0, seconds)),
+                             @"channel": channel,
+                             @"value": @([columns[5] doubleValue])}];
+    }
+
+    if (samples.count == 0 || startDate == nil) {
+        if (message != NULL) {
+            *message = @"Selected session has no readable Muse samples.";
+        }
+        return NO;
+    }
+
+    NSString *annotationsText = [NSString stringWithContentsOfFile:annotationsPath encoding:NSUTF8StringEncoding error:nil];
+    NSMutableArray<NSDictionary *> *annotations = [NSMutableArray array];
+    for (NSString *line in [annotationsText componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]]) {
+        if (line.length == 0 || [line hasPrefix:@"timestamp_utc,"]) {
+            continue;
+        }
+
+        NSArray<NSString *> *columns = [line componentsSeparatedByString:@","];
+        if (columns.count < 4) {
+            continue;
+        }
+
+        NSDate *annotationDate = [self dateFromISOString:columns[0] formatter:formatter];
+        if (annotationDate == nil) {
+            continue;
+        }
+        NSTimeInterval seconds = [annotationDate timeIntervalSinceDate:startDate];
+        [annotations addObject:@{@"seconds": @(seconds),
+                                 @"label": columns[2],
+                                 @"type": columns[3]}];
+    }
+
+    self.waveformView.samples = samples;
+    self.waveformView.annotations = annotations;
+    self.waveformView.channels = channels.array;
+    self.waveformView.duration = MAX([endDate timeIntervalSinceDate:startDate], 0.1);
+    return YES;
+}
+
+- (void)buildWaveformWindowIfNeeded {
+    if (self.waveformWindow != nil) {
+        return;
+    }
+
+    NSRect frame = NSMakeRect(0, 0, 920, 540);
+    self.waveformWindow = [[NSWindow alloc] initWithContentRect:frame
+                                                      styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable
+                                                        backing:NSBackingStoreBuffered
+                                                          defer:NO];
+    self.waveformWindow.title = @"ThumOS Waveform";
+    self.waveformWindow.releasedWhenClosed = NO;
+    [self.waveformWindow center];
+
+    self.waveformView = [[THWaveformView alloc] initWithFrame:frame];
+    self.waveformView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    self.waveformWindow.contentView = self.waveformView;
+}
+
+- (void)showWaveform:(id)sender {
+    (void)sender;
+    NSString *sessionDirectory = [self sessionDirectoryForActions];
+    if (sessionDirectory.length == 0) {
+        self.windowStatusLabel.stringValue = @"Select a session first.";
+        return;
+    }
+
+    [self buildWaveformWindowIfNeeded];
+    NSString *message = nil;
+    if (![self loadWaveformSession:sessionDirectory message:&message]) {
+        self.windowStatusLabel.stringValue = message ?: @"Could not load waveform.";
+        return;
+    }
+
+    self.waveformWindow.title = [NSString stringWithFormat:@"ThumOS Waveform - %@", sessionDirectory.lastPathComponent];
+    [self.waveformWindow makeKeyAndOrderFront:nil];
+    [NSApp activateIgnoringOtherApps:YES];
+}
+
+- (void)openSelectedSessionFolder:(id)sender {
+    (void)sender;
+    NSString *sessionDirectory = [self sessionDirectoryForActions];
+    if (sessionDirectory.length == 0) {
+        self.windowStatusLabel.stringValue = [NSString stringWithFormat:@"No sessions found in %@.", [self displayPath:self.sessionsRootPath]];
+        return;
+    }
+
+    NSURL *sessionURL = [NSURL fileURLWithPath:sessionDirectory];
+    [[NSWorkspace sharedWorkspace] activateFileViewerSelectingURLs:@[sessionURL]];
+    self.windowStatusLabel.stringValue = [NSString stringWithFormat:@"Opened %@", [self displayPath:sessionDirectory]];
+}
+
+- (NSString *)selectedSessionCreatorEventsText {
+    NSString *sessionDirectory = [self sessionDirectoryForActions];
+    if (sessionDirectory.length == 0) {
+        return @"Select a session first.";
+    }
+
+    NSString *path = [sessionDirectory stringByAppendingPathComponent:THCreatorEventsFilename()];
+    NSString *text = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+    return text.length > 0 ? text : @"No Creator events found for this session.";
+}
+
+- (NSString *)selectedSessionExportFilename {
+    NSString *sessionDirectory = [self sessionDirectoryForActions];
+    NSString *name = sessionDirectory.lastPathComponent.length > 0 ? sessionDirectory.lastPathComponent : @"thumos-session";
+    return [NSString stringWithFormat:@"%@-creator-events.csv", name];
 }
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender {
@@ -814,10 +980,6 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
     exportButton.frame = NSMakeRect(14, 36, 74, 24);
     [view addSubview:exportButton];
 
-    NSButton *clearButton = [NSButton buttonWithTitle:@"Clear" target:self action:@selector(clearEvents:)];
-    clearButton.frame = NSMakeRect(94, 36, 64, 24);
-    [view addSubview:clearButton];
-
     controller.view = view;
     self.popover = [[NSPopover alloc] init];
     self.popover.contentViewController = controller;
@@ -906,16 +1068,20 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
                                                  color:nil];
     [content addSubview:sessionsLabel];
 
-    self.windowSessionPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(24, 116, 360, 30) pullsDown:NO];
+    self.windowSessionPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(24, 116, 286, 30) pullsDown:NO];
     [content addSubview:self.windowSessionPopup];
 
     NSButton *refreshSessionsButton = [NSButton buttonWithTitle:@"Refresh" target:self action:@selector(refreshSessionList:)];
-    refreshSessionsButton.frame = NSMakeRect(396, 117, 82, 28);
+    refreshSessionsButton.frame = NSMakeRect(322, 117, 74, 28);
     [content addSubview:refreshSessionsButton];
 
     NSButton *viewWaveformButton = [NSButton buttonWithTitle:@"View Waveform" target:self action:@selector(showWaveform:)];
-    viewWaveformButton.frame = NSMakeRect(486, 117, 120, 28);
+    viewWaveformButton.frame = NSMakeRect(404, 117, 122, 28);
     [content addSubview:viewWaveformButton];
+
+    NSButton *openSessionButton = [NSButton buttonWithTitle:@"Open Folder" target:self action:@selector(openSelectedSessionFolder:)];
+    openSessionButton.frame = NSMakeRect(534, 117, 116, 28);
+    [content addSubview:openSessionButton];
 
     NSTextField *databaseLabel = [self labelWithString:@"Data"
                                                  frame:NSMakeRect(24, 74, 80, 18)
@@ -930,10 +1096,6 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
     NSButton *exportButton = [NSButton buttonWithTitle:@"Export CSV" target:self action:@selector(exportCSV:)];
     exportButton.frame = NSMakeRect(120, 38, 96, 28);
     [content addSubview:exportButton];
-
-    NSButton *clearButton = [NSButton buttonWithTitle:@"Clear Events" target:self action:@selector(clearEvents:)];
-    clearButton.frame = NSMakeRect(564, 39, 110, 28);
-    [content addSubview:clearButton];
 
     [self updateOutputFolderLabel];
 }
@@ -1038,11 +1200,12 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
     self.updatingSwitch = YES;
     self.popoverRecordingSwitch.state = running ? NSControlStateValueOn : NSControlStateValueOff;
     self.windowRecordingSwitch.state = running ? NSControlStateValueOn : NSControlStateValueOff;
-     self.updatingSwitch = NO;
-     self.statusItem.button.title = running ? @"ThumOS On" : @"ThumOS Off";
+    self.updatingSwitch = NO;
+    self.statusItem.button.title = running ? @"ThumOS On" : @"ThumOS Off";
+    NSString *runningStatus = self.recordingStatusOverride.length > 0 ? self.recordingStatusOverride : @"Recording session.";
     NSString *stoppedStatus = self.recordingStatusOverride.length > 0 ? self.recordingStatusOverride : @"Recorder is stopped.";
-    self.popoverStatusLabel.stringValue = running ? @"Recorder is running" : stoppedStatus;
-    self.windowStatusLabel.stringValue = running ? @"Recorder is running in the background." : stoppedStatus;
+    self.popoverStatusLabel.stringValue = running ? runningStatus : stoppedStatus;
+    self.windowStatusLabel.stringValue = running ? runningStatus : stoppedStatus;
      [self syncMuseControls];
  }
 
@@ -1080,8 +1243,8 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
     if (!success) {
         self.recordingStatusOverride = message ?: @"Error";
     } else {
-        self.recordingStatusOverride = nil;
-        [self refreshSessionList:nil];
+        self.recordingStatusOverride = message;
+        [self refreshSessionListSelectingPath:shouldRecord ? self.currentSessionDirectory : self.lastFinishedSessionDirectory];
     }
     [self refreshStatus];
   }
@@ -1368,34 +1531,26 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
                                     keyCode:(NSInteger)keyCode
                                 monotonicNS:(sqlite3_int64)monotonicNS
                                  rawPayload:(NSString *)rawPayload {
-    if (_creatorInsertStatement == NULL) {
+    if (self.creatorEventsFileHandle == nil) {
         return NO;
     }
 
-    NSString *occurredAt = [_creatorDateFormatter stringFromDate:[NSDate date]];
-    NSString *activeAppBundleID = THActiveAppBundleID();
-
-    sqlite3_reset(_creatorInsertStatement);
-    sqlite3_clear_bindings(_creatorInsertStatement);
-    sqlite3_bind_text(_creatorInsertStatement, 1, "hid", -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(_creatorInsertStatement, 2, [deviceName UTF8String], -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(_creatorInsertStatement, 3, [commandID UTF8String], -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(_creatorInsertStatement, 4, [commandID UTF8String], -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(_creatorInsertStatement, 5, [eventType UTF8String], -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int64(_creatorInsertStatement, 6, (sqlite3_int64)keyCode);
-    sqlite3_bind_int64(_creatorInsertStatement, 7, 0);
-    sqlite3_bind_text(_creatorInsertStatement, 8, [occurredAt UTF8String], -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int64(_creatorInsertStatement, 9, monotonicNS);
-    sqlite3_bind_text(_creatorInsertStatement, 10, [activeAppBundleID UTF8String], -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(_creatorInsertStatement, 11, [rawPayload UTF8String], -1, SQLITE_TRANSIENT);
-
-    int stepResult = sqlite3_step(_creatorInsertStatement);
-    sqlite3_reset(_creatorInsertStatement);
-    return stepResult == SQLITE_DONE;
+    NSString *timestampUTC = THISODateString([NSDate date]);
+    NSString *line = [NSString stringWithFormat:@"%@,%lld,%@,%@,%@,%ld,%@\n",
+                                                timestampUTC,
+                                                monotonicNS,
+                                                THCSVField(deviceName),
+                                                THCSVField(commandID),
+                                                THCSVField(eventType),
+                                                (long)keyCode,
+                                                THCSVField(rawPayload)];
+    [self writeLine:line toFileHandle:self.creatorEventsFileHandle];
+    [self processSemanticCreatorCommandID:commandID timestampUTC:timestampUTC monotonicNS:monotonicNS];
+    return YES;
 }
 
 - (void)handleCreatorHIDValue:(IOHIDValueRef)value result:(IOReturn)result {
-    if (result != kIOReturnSuccess || value == NULL || _creatorInsertStatement == NULL) {
+    if (result != kIOReturnSuccess || value == NULL || self.creatorEventsFileHandle == nil) {
         return;
     }
 
@@ -1542,6 +1697,9 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
 
     self.museConnecting = NO;
     [self setMuseStatus:[NSString stringWithFormat:@"Connected to %@", [self museDisplayName]] connected:YES];
+    if ([self isRecording] && !self.eegRecording) {
+        [self startEEGRecording];
+    }
 }
 
 - (BOOL)writeMuseControlCommand:(NSData *)command {
@@ -1630,17 +1788,14 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
         return;
     }
 
-    NSError *error = nil;
-    if (![[NSFileManager defaultManager] createDirectoryAtPath:THEEGRecordingsDirectory()
-                                   withIntermediateDirectories:YES
-                                                    attributes:nil
-                                                         error:&error]) {
-        [self setMuseStatus:error.localizedDescription ?: @"Could not create EEG recording folder." connected:YES];
+    if (self.currentSessionDirectory.length == 0) {
+        [self setMuseStatus:@"Start a session before EEG recording." connected:YES];
         return;
     }
 
-    NSString *filename = [NSString stringWithFormat:@"muse-eeg-%@.csv", THFilenameTimestamp()];
-    NSString *path = [THEEGRecordingsDirectory() stringByAppendingPathComponent:filename];
+    NSError *error = nil;
+    NSString *filename = THMuseEventsFilename();
+    NSString *path = [self.currentSessionDirectory stringByAppendingPathComponent:filename];
     NSString *header = @"recording_started_at_utc,sample_timestamp_utc,device_name,channel,channel_sample_index,value_uv\n";
     if (![header writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&error]) {
         [self setMuseStatus:error.localizedDescription ?: @"Could not create EEG CSV." connected:YES];
@@ -2002,7 +2157,7 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
 
 - (void)refreshDataWindow:(id)sender {
     (void)sender;
-    self.dataTextView.string = THRecentEventsText();
+    self.dataTextView.string = [self selectedSessionCreatorEventsText];
 }
 
 - (void)showData:(id)sender {
@@ -2018,7 +2173,7 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
     (void)sender;
     NSSavePanel *panel = [NSSavePanel savePanel];
     panel.allowedContentTypes = @[[UTType typeWithFilenameExtension:@"csv"]];
-    panel.nameFieldStringValue = THDefaultExportFilename();
+    panel.nameFieldStringValue = [self selectedSessionExportFilename];
     panel.canCreateDirectories = YES;
 
     NSModalResponse response = [panel runModal];
@@ -2026,9 +2181,9 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
         return;
     }
 
-    NSString *csv = THEventsCSVText();
+    NSString *csv = [self selectedSessionCreatorEventsText];
     if (csv.length == 0) {
-        csv = @"time,source,device,command,event,active_app\n";
+        csv = @"timestamp_utc,monotonic_ns,device_name,command_id,event_type,key_code,raw_payload\n";
     }
 
     NSError *error = nil;
@@ -2067,7 +2222,7 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
         return NO;
     }
 
-    if (![self openCreatorEventStoreWithMessage:message]) {
+    if (![self openSessionFilesWithMessage:message]) {
         return NO;
     }
 
@@ -2076,7 +2231,8 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
         if (message != NULL) {
             *message = @"Could not create Creator HID monitor.";
         }
-        [self closeCreatorEventStore];
+        [self closeSessionFiles];
+        self.currentSessionDirectory = nil;
         return NO;
     }
 
@@ -2085,14 +2241,23 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
     IOHIDManagerScheduleWithRunLoop(_creatorHIDManager, CFRunLoopGetMain(), kCFRunLoopCommonModes);
 
     IOReturn openResult = IOHIDManagerOpen(_creatorHIDManager, kIOHIDOptionsTypeNone);
-    if (openResult != kIOReturnSuccess) {
+      if (openResult != kIOReturnSuccess) {
         if (message != NULL) {
             *message = [NSString stringWithFormat:@"Could not open Creator HID monitor: 0x%x", openResult];
         }
-        [self stopRecording:nil];
-        return NO;
+          [self stopRecording:nil];
+          return NO;
+      }
+
+    if (self.museConnected) {
+        [self startEEGRecording];
+    } else {
+        [self setMuseStatus:@"Muse not connected; recording Creator only." connected:NO];
     }
 
+    if (message != NULL) {
+        *message = [NSString stringWithFormat:@"Recording %@", self.currentSessionDirectory.lastPathComponent ?: @"session"];
+    }
     return YES;
 }
 
@@ -2103,9 +2268,25 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
         IOHIDManagerClose(_creatorHIDManager, kIOHIDOptionsTypeNone);
         CFRelease(_creatorHIDManager);
         _creatorHIDManager = NULL;
+      }
+
+    if (self.eegRecording || self.eegFileHandle != nil) {
+        [self stopEEGRecordingWithStatus:NO];
     }
 
-    [self closeCreatorEventStore];
+    NSString *finishedSession = self.currentSessionDirectory;
+    [self closeSessionFiles];
+    self.currentSessionDirectory = nil;
+    if (finishedSession.length > 0) {
+        self.lastFinishedSessionDirectory = finishedSession;
+        if (message != NULL) {
+            if ([self sessionDirectoryHasData:finishedSession]) {
+                *message = [NSString stringWithFormat:@"Saved %@ in %@", finishedSession.lastPathComponent, [self displayPath:finishedSession.stringByDeletingLastPathComponent]];
+            } else {
+                *message = [NSString stringWithFormat:@"Stopped; session folder not found at %@", [self displayPath:finishedSession]];
+            }
+        }
+    }
     return YES;
 }
 

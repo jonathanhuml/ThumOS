@@ -35,7 +35,8 @@ app: $(BIN) $(UI_SRC) packaging/ThumOS-Info.plist
 		$(UI_SRC) -o "$(APP_BIN)"
 	cp "$(BIN)" "$(APP_DAEMON)"
 	cp packaging/ThumOS-Info.plist "$(APP_INFO)"
-	codesign --force --deep --sign - "$(APP)"
+	codesign --force --sign - --identifier io.thumos.daemon --requirements '=designated => identifier "io.thumos.daemon"' "$(APP_DAEMON)"
+	codesign --force --sign - --requirements '=designated => identifier "io.thumos.menu"' "$(APP)"
 
 init: $(BIN)
 	$(BIN) --init
