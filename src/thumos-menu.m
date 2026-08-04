@@ -408,6 +408,18 @@ static NSString *THAnnotationsFilename(void) {
     return @"annotations.csv";
 }
 
+static NSString *THCreatorEventsHeader(void) {
+    return @"timestamp_utc,monotonic_ns,device_name,command_id,event_type,key_code,raw_payload\n";
+}
+
+static NSString *THMuseEventsHeader(void) {
+    return @"recording_started_at_utc,sample_timestamp_utc,device_name,channel,channel_sample_index,value_uv\n";
+}
+
+static NSString *THAnnotationsHeader(void) {
+    return @"timestamp_utc,monotonic_ns,label,type,command_id\n";
+}
+
 static BOOL THAcquireSingleInstanceLock(NSError **error) {
     NSString *directory = THApplicationSupportDirectory();
     if (![[NSFileManager defaultManager] createDirectoryAtPath:directory
@@ -466,6 +478,8 @@ static NSString *THCSVField(NSString *value) {
 @property(nonatomic, strong) NSButton *popoverMuseButton;
 @property(nonatomic, strong) NSButton *windowMuseButton;
 @property(nonatomic, strong) NSTextField *windowOutputFolderLabel;
+@property(nonatomic, strong) NSTextField *viewerFolderLabel;
+@property(nonatomic, strong) NSTextField *viewerStatusLabel;
 @property(nonatomic, strong) NSPopUpButton *windowSessionPopup;
 @property(nonatomic, strong) NSWindow *waveformWindow;
 @property(nonatomic, strong) THWaveformView *waveformView;
@@ -485,6 +499,7 @@ static NSString *THCSVField(NSString *value) {
 @property(nonatomic, strong) NSTimer *refreshTimer;
 @property(nonatomic, copy) NSString *recordingStatusOverride;
 @property(nonatomic, copy) NSString *sessionsRootPath;
+@property(nonatomic, copy) NSString *viewerSessionsRootPath;
 @property(nonatomic, copy) NSString *currentSessionDirectory;
 @property(nonatomic, copy) NSString *lastFinishedSessionDirectory;
 @property(nonatomic, strong) NSFileHandle *creatorEventsFileHandle;
@@ -496,10 +511,15 @@ static NSString *THCSVField(NSString *value) {
 @property(nonatomic) BOOL museStreaming;
 @property(nonatomic) BOOL eegRecording;
 @property(nonatomic) BOOL talkOpen;
+@property(nonatomic) BOOL recordingStatusIsError;
+@property(nonatomic) BOOL viewerFolderCustomized;
 - (void)handleCreatorHIDValue:(IOHIDValueRef)value result:(IOReturn)result;
 - (void)refreshSessionListSelectingPath:(NSString *)preferredPath;
 - (NSString *)sessionDirectoryForActions;
 - (BOOL)sessionDirectoryHasData:(NSString *)path;
+- (BOOL)sessionDirectoryHasAnnotatedWaveform:(NSString *)path;
+- (void)chooseViewerFolder:(id)sender;
+- (void)selectViewerSession:(id)sender;
 - (void)openSelectedSessionFolder:(id)sender;
 - (void)startEEGRecording;
 - (NSImage *)crownStatusImageForRecording:(BOOL)recording;
@@ -554,8 +574,11 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
 - (void)loadSessionsRoot {
     NSString *savedPath = [[NSUserDefaults standardUserDefaults] stringForKey:THSessionsRootDefaultsKey];
     self.sessionsRootPath = savedPath.length > 0 ? [savedPath stringByExpandingTildeInPath] : THDefaultSessionsRootDirectory();
+    self.viewerSessionsRootPath = self.sessionsRootPath;
+    self.viewerFolderCustomized = NO;
     self.creatorRecentCommands = [NSMutableArray array];
     [self updateOutputFolderLabel];
+    [self updateViewerFolderLabel];
 }
 
 - (NSString *)displayPath:(NSString *)path {
@@ -568,6 +591,10 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
 
 - (void)updateOutputFolderLabel {
     self.windowOutputFolderLabel.stringValue = self.sessionsRootPath.length > 0 ? [self displayPath:self.sessionsRootPath] : @"No folder selected";
+}
+
+- (void)updateViewerFolderLabel {
+    self.viewerFolderLabel.stringValue = self.viewerSessionsRootPath.length > 0 ? [self displayPath:self.viewerSessionsRootPath] : @"No viewer folder selected";
 }
 
 - (BOOL)ensureSessionsRootWithMessage:(NSString **)message {
@@ -605,8 +632,43 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
 
     self.sessionsRootPath = panel.URL.path;
     [[NSUserDefaults standardUserDefaults] setObject:self.sessionsRootPath forKey:THSessionsRootDefaultsKey];
+    if (!self.viewerFolderCustomized) {
+        self.viewerSessionsRootPath = self.sessionsRootPath;
+        [self updateViewerFolderLabel];
+    }
     [self updateOutputFolderLabel];
     [self refreshSessionList:nil];
+}
+
+- (void)chooseViewerFolder:(id)sender {
+    (void)sender;
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.canChooseDirectories = YES;
+    panel.canChooseFiles = NO;
+    panel.canCreateDirectories = NO;
+    panel.allowsMultipleSelection = NO;
+    panel.directoryURL = self.viewerSessionsRootPath.length > 0 ? [NSURL fileURLWithPath:self.viewerSessionsRootPath] : nil;
+    panel.message = @"Choose a folder containing ThumOS session folders.";
+
+    if ([panel runModal] != NSModalResponseOK || panel.URL.path.length == 0) {
+        return;
+    }
+
+    self.viewerSessionsRootPath = panel.URL.path;
+    self.viewerFolderCustomized = YES;
+    [self updateViewerFolderLabel];
+    [self refreshSessionList:nil];
+}
+
+- (BOOL)fileAtPath:(NSString *)path hasBytesBeyondHeader:(NSString *)header {
+    NSDictionary<NSFileAttributeKey, id> *attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:nil];
+    if (attributes == nil) {
+        return NO;
+    }
+
+    unsigned long long fileSize = [attributes fileSize];
+    NSUInteger headerSize = [[header dataUsingEncoding:NSUTF8StringEncoding] length];
+    return fileSize > headerSize;
 }
 
 - (BOOL)sessionDirectoryHasData:(NSString *)path {
@@ -627,6 +689,22 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
            [[NSFileManager defaultManager] fileExistsAtPath:annotationsPath];
 }
 
+- (BOOL)sessionDirectoryHasAnnotatedWaveform:(NSString *)path {
+    if (path.length == 0) {
+        return NO;
+    }
+
+    BOOL isDirectory = NO;
+    if (![[NSFileManager defaultManager] fileExistsAtPath:path isDirectory:&isDirectory] || !isDirectory) {
+        return NO;
+    }
+
+    NSString *musePath = [path stringByAppendingPathComponent:THMuseEventsFilename()];
+    NSString *annotationsPath = [path stringByAppendingPathComponent:THAnnotationsFilename()];
+    return [self fileAtPath:musePath hasBytesBeyondHeader:THMuseEventsHeader()] &&
+           [self fileAtPath:annotationsPath hasBytesBeyondHeader:THAnnotationsHeader()];
+}
+
 - (void)addSessionDirectoriesFromRoot:(NSString *)root toSet:(NSMutableSet<NSString *> *)sessions {
     NSString *standardRoot = [[root stringByExpandingTildeInPath] stringByStandardizingPath];
     if (standardRoot.length == 0) {
@@ -636,7 +714,7 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
     NSArray<NSString *> *items = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:standardRoot error:nil];
     for (NSString *item in items) {
         NSString *path = [[standardRoot stringByAppendingPathComponent:item] stringByStandardizingPath];
-        if ([self sessionDirectoryHasData:path]) {
+        if ([self sessionDirectoryHasAnnotatedWaveform:path]) {
             [sessions addObject:path];
         }
     }
@@ -644,11 +722,11 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
 
 - (NSArray<NSString *> *)sessionDirectories {
     NSMutableSet<NSString *> *sessions = [NSMutableSet set];
-    [self addSessionDirectoriesFromRoot:self.sessionsRootPath toSet:sessions];
-    [self addSessionDirectoriesFromRoot:THDefaultSessionsRootDirectory() toSet:sessions];
+    NSString *root = self.viewerSessionsRootPath.length > 0 ? self.viewerSessionsRootPath : self.sessionsRootPath;
+    [self addSessionDirectoriesFromRoot:root toSet:sessions];
 
     NSString *lastFinished = [self.lastFinishedSessionDirectory stringByStandardizingPath];
-    if ([self sessionDirectoryHasData:lastFinished]) {
+    if ([self sessionDirectoryHasAnnotatedWaveform:lastFinished]) {
         [sessions addObject:lastFinished];
     }
 
@@ -669,8 +747,14 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
 
     NSArray<NSString *> *sessions = [self sessionDirectories];
     if (sessions.count == 0) {
-        [self.windowSessionPopup addItemWithTitle:@"No sessions"];
+        [self.windowSessionPopup addItemWithTitle:@"No annotated waveforms"];
         self.windowSessionPopup.enabled = NO;
+        self.viewerStatusLabel.stringValue = @"No annotated waveforms found.";
+        self.viewerStatusLabel.textColor = [NSColor secondaryLabelColor];
+        self.waveformView.samples = @[];
+        self.waveformView.annotations = @[];
+        self.waveformView.channels = @[];
+        self.waveformView.duration = 0.0;
         return;
     }
 
@@ -686,6 +770,8 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
             selectedPreferred = YES;
         }
     }
+
+    [self selectViewerSession:nil];
 }
 
 - (NSString *)selectedSessionDirectory {
@@ -822,33 +908,40 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
     (void)sender;
     NSString *sessionDirectory = [self sessionDirectoryForActions];
     if (sessionDirectory.length == 0) {
-        self.windowStatusLabel.stringValue = @"Select a session first.";
+        self.viewerStatusLabel.stringValue = @"Select an annotated waveform first.";
+        self.viewerStatusLabel.textColor = [NSColor secondaryLabelColor];
         return;
     }
 
-    [self buildWaveformWindowIfNeeded];
     NSString *message = nil;
     if (![self loadWaveformSession:sessionDirectory message:&message]) {
-        self.windowStatusLabel.stringValue = message ?: @"Could not load waveform.";
+        self.viewerStatusLabel.stringValue = message ?: @"Could not load waveform.";
+        self.viewerStatusLabel.textColor = [NSColor systemRedColor];
         return;
     }
 
-    self.waveformWindow.title = [NSString stringWithFormat:@"ThumOS Waveform - %@", sessionDirectory.lastPathComponent];
-    [self.waveformWindow makeKeyAndOrderFront:nil];
-    [NSApp activateIgnoringOtherApps:YES];
+    self.viewerStatusLabel.stringValue = [NSString stringWithFormat:@"Showing %@", sessionDirectory.lastPathComponent];
+    self.viewerStatusLabel.textColor = [NSColor secondaryLabelColor];
+}
+
+- (void)selectViewerSession:(id)sender {
+    (void)sender;
+    [self showWaveform:nil];
 }
 
 - (void)openSelectedSessionFolder:(id)sender {
     (void)sender;
     NSString *sessionDirectory = [self sessionDirectoryForActions];
     if (sessionDirectory.length == 0) {
-        self.windowStatusLabel.stringValue = [NSString stringWithFormat:@"No sessions found in %@.", [self displayPath:self.sessionsRootPath]];
+        self.viewerStatusLabel.stringValue = [NSString stringWithFormat:@"No annotated waveforms found in %@.", [self displayPath:self.viewerSessionsRootPath]];
+        self.viewerStatusLabel.textColor = [NSColor secondaryLabelColor];
         return;
     }
 
     NSURL *sessionURL = [NSURL fileURLWithPath:sessionDirectory];
     [[NSWorkspace sharedWorkspace] activateFileViewerSelectingURLs:@[sessionURL]];
-    self.windowStatusLabel.stringValue = [NSString stringWithFormat:@"Opened %@", [self displayPath:sessionDirectory]];
+    self.viewerStatusLabel.stringValue = [NSString stringWithFormat:@"Opened %@", [self displayPath:sessionDirectory]];
+    self.viewerStatusLabel.textColor = [NSColor secondaryLabelColor];
 }
 
 - (NSString *)selectedSessionCreatorEventsText {
@@ -1030,116 +1123,183 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
 }
 
 - (void)buildMainWindow {
-    NSRect frame = NSMakeRect(0, 0, 700, 470);
+    NSRect frame = NSMakeRect(0, 0, 920, 620);
     self.mainWindow = [[NSWindow alloc] initWithContentRect:frame
-                                                  styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable
+                                                  styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable
                                                     backing:NSBackingStoreBuffered
                                                       defer:NO];
     self.mainWindow.title = @"ThumOS";
     self.mainWindow.delegate = self;
     self.mainWindow.releasedWhenClosed = NO;
+    self.mainWindow.minSize = NSMakeSize(720, 500);
     [self.mainWindow center];
 
     NSView *content = [[NSView alloc] initWithFrame:frame];
+    content.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     self.mainWindow.contentView = content;
 
     NSTextField *title = [self labelWithString:@"ThumOS"
-                                         frame:NSMakeRect(24, 412, 220, 28)
+                                         frame:NSMakeRect(24, 562, 220, 28)
                                           font:[NSFont systemFontOfSize:22 weight:NSFontWeightSemibold]
                                          color:nil];
+    title.autoresizingMask = NSViewMinYMargin | NSViewMaxXMargin;
     [content addSubview:title];
 
     NSTextField *subtitle = [self labelWithString:@"Creator Micro and Muse recorder"
-                                            frame:NSMakeRect(24, 388, 300, 18)
+                                            frame:NSMakeRect(24, 538, 300, 18)
                                              font:[NSFont systemFontOfSize:12]
                                             color:[NSColor secondaryLabelColor]];
+    subtitle.autoresizingMask = NSViewMinYMargin | NSViewMaxXMargin;
     [content addSubview:subtitle];
 
+    NSTabView *tabView = [[NSTabView alloc] initWithFrame:NSMakeRect(20, 20, 880, 500)];
+    tabView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    [content addSubview:tabView];
+
+    NSTabViewItem *controlItem = [[NSTabViewItem alloc] initWithIdentifier:@"control"];
+    controlItem.label = @"Control";
+    NSView *controlView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 860, 450)];
+    controlView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    controlItem.view = controlView;
+    [tabView addTabViewItem:controlItem];
+
     NSTextField *recording = [self labelWithString:@"Session Recording"
-                                             frame:NSMakeRect(24, 342, 180, 20)
+                                             frame:NSMakeRect(24, 385, 180, 20)
                                               font:[NSFont systemFontOfSize:14 weight:NSFontWeightMedium]
                                              color:nil];
-    [content addSubview:recording];
+    recording.autoresizingMask = NSViewMinYMargin | NSViewMaxXMargin;
+    [controlView addSubview:recording];
 
-    self.windowRecordingSwitch = [[NSSwitch alloc] initWithFrame:NSMakeRect(624, 336, 50, 28)];
+    self.windowRecordingSwitch = [[NSSwitch alloc] initWithFrame:NSMakeRect(780, 379, 50, 28)];
+    self.windowRecordingSwitch.autoresizingMask = NSViewMinXMargin | NSViewMinYMargin;
     self.windowRecordingSwitch.target = self;
     self.windowRecordingSwitch.action = @selector(toggleRecording:);
-    [content addSubview:self.windowRecordingSwitch];
+    [controlView addSubview:self.windowRecordingSwitch];
 
     self.windowStatusLabel = [self labelWithString:@"Off"
-                                             frame:NSMakeRect(24, 318, 640, 18)
+                                             frame:NSMakeRect(24, 361, 800, 18)
                                               font:[NSFont systemFontOfSize:12]
                                              color:[NSColor secondaryLabelColor]];
-    [content addSubview:self.windowStatusLabel];
+    self.windowStatusLabel.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
+    [controlView addSubview:self.windowStatusLabel];
 
     NSTextField *museLabel = [self labelWithString:@"Muse Headset"
-                                             frame:NSMakeRect(24, 278, 180, 20)
+                                             frame:NSMakeRect(24, 306, 180, 20)
                                               font:[NSFont systemFontOfSize:14 weight:NSFontWeightMedium]
                                              color:nil];
-    [content addSubview:museLabel];
+    museLabel.autoresizingMask = NSViewMinYMargin | NSViewMaxXMargin;
+    [controlView addSubview:museLabel];
 
     self.windowMuseButton = [NSButton buttonWithTitle:@"Connect Muse" target:self action:@selector(toggleMuseConnection:)];
-    self.windowMuseButton.frame = NSMakeRect(558, 273, 116, 28);
-    [content addSubview:self.windowMuseButton];
+    self.windowMuseButton.frame = NSMakeRect(704, 301, 126, 28);
+    self.windowMuseButton.autoresizingMask = NSViewMinXMargin | NSViewMinYMargin;
+    [controlView addSubview:self.windowMuseButton];
 
     self.windowMuseStatusLabel = [self labelWithString:@"Disconnected"
-                                                 frame:NSMakeRect(24, 254, 640, 18)
+                                                 frame:NSMakeRect(24, 282, 800, 18)
                                                   font:[NSFont systemFontOfSize:12]
                                                  color:[NSColor secondaryLabelColor]];
-    [content addSubview:self.windowMuseStatusLabel];
+    self.windowMuseStatusLabel.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
+    [controlView addSubview:self.windowMuseStatusLabel];
 
     NSTextField *folderLabel = [self labelWithString:@"Output Folder"
-                                               frame:NSMakeRect(24, 214, 180, 20)
+                                               frame:NSMakeRect(24, 226, 180, 20)
                                                 font:[NSFont systemFontOfSize:14 weight:NSFontWeightMedium]
                                                color:nil];
-    [content addSubview:folderLabel];
+    folderLabel.autoresizingMask = NSViewMinYMargin | NSViewMaxXMargin;
+    [controlView addSubview:folderLabel];
 
     NSButton *chooseFolderButton = [NSButton buttonWithTitle:@"Choose Folder" target:self action:@selector(chooseOutputFolder:)];
-    chooseFolderButton.frame = NSMakeRect(548, 209, 126, 28);
-    [content addSubview:chooseFolderButton];
+    chooseFolderButton.frame = NSMakeRect(704, 221, 126, 28);
+    chooseFolderButton.autoresizingMask = NSViewMinXMargin | NSViewMinYMargin;
+    [controlView addSubview:chooseFolderButton];
 
     self.windowOutputFolderLabel = [self labelWithString:@""
-                                                  frame:NSMakeRect(24, 190, 640, 18)
+                                                  frame:NSMakeRect(24, 202, 800, 18)
                                                    font:[NSFont systemFontOfSize:12]
                                                   color:[NSColor secondaryLabelColor]];
-    [content addSubview:self.windowOutputFolderLabel];
+    self.windowOutputFolderLabel.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
+    [controlView addSubview:self.windowOutputFolderLabel];
 
-    NSTextField *sessionsLabel = [self labelWithString:@"Session Viewer"
-                                                 frame:NSMakeRect(24, 150, 180, 20)
+    NSTabViewItem *viewerItem = [[NSTabViewItem alloc] initWithIdentifier:@"viewer"];
+    viewerItem.label = @"Viewer";
+    NSView *viewerView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 860, 450)];
+    viewerView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    viewerItem.view = viewerView;
+    [tabView addTabViewItem:viewerItem];
+
+    NSTextField *viewerFolderTitle = [self labelWithString:@"Viewer Folder"
+                                                     frame:NSMakeRect(24, 390, 180, 20)
+                                                      font:[NSFont systemFontOfSize:14 weight:NSFontWeightMedium]
+                                                     color:nil];
+    viewerFolderTitle.autoresizingMask = NSViewMinYMargin | NSViewMaxXMargin;
+    [viewerView addSubview:viewerFolderTitle];
+
+    NSButton *chooseViewerFolderButton = [NSButton buttonWithTitle:@"Choose Folder" target:self action:@selector(chooseViewerFolder:)];
+    chooseViewerFolderButton.frame = NSMakeRect(150, 386, 112, 28);
+    chooseViewerFolderButton.autoresizingMask = NSViewMinYMargin | NSViewMaxXMargin;
+    [viewerView addSubview:chooseViewerFolderButton];
+
+    self.viewerFolderLabel = [self labelWithString:@""
+                                             frame:NSMakeRect(24, 366, 238, 18)
+                                              font:[NSFont systemFontOfSize:11]
+                                             color:[NSColor secondaryLabelColor]];
+    self.viewerFolderLabel.autoresizingMask = NSViewMinYMargin | NSViewMaxXMargin;
+    [viewerView addSubview:self.viewerFolderLabel];
+
+    NSTextField *sessionsLabel = [self labelWithString:@"Annotated Waveforms"
+                                                 frame:NSMakeRect(24, 326, 220, 20)
                                                   font:[NSFont systemFontOfSize:14 weight:NSFontWeightMedium]
                                                  color:nil];
-    [content addSubview:sessionsLabel];
+    sessionsLabel.autoresizingMask = NSViewMinYMargin | NSViewMaxXMargin;
+    [viewerView addSubview:sessionsLabel];
 
-    self.windowSessionPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(24, 116, 286, 30) pullsDown:NO];
-    [content addSubview:self.windowSessionPopup];
+    self.windowSessionPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(24, 292, 238, 30) pullsDown:NO];
+    self.windowSessionPopup.autoresizingMask = NSViewMinYMargin | NSViewMaxXMargin;
+    self.windowSessionPopup.target = self;
+    self.windowSessionPopup.action = @selector(selectViewerSession:);
+    [viewerView addSubview:self.windowSessionPopup];
 
     NSButton *refreshSessionsButton = [NSButton buttonWithTitle:@"Refresh" target:self action:@selector(refreshSessionList:)];
-    refreshSessionsButton.frame = NSMakeRect(322, 117, 74, 28);
-    [content addSubview:refreshSessionsButton];
-
-    NSButton *viewWaveformButton = [NSButton buttonWithTitle:@"View Waveform" target:self action:@selector(showWaveform:)];
-    viewWaveformButton.frame = NSMakeRect(404, 117, 122, 28);
-    [content addSubview:viewWaveformButton];
+    refreshSessionsButton.frame = NSMakeRect(24, 250, 78, 28);
+    refreshSessionsButton.autoresizingMask = NSViewMinYMargin | NSViewMaxXMargin;
+    [viewerView addSubview:refreshSessionsButton];
 
     NSButton *openSessionButton = [NSButton buttonWithTitle:@"Open Folder" target:self action:@selector(openSelectedSessionFolder:)];
-    openSessionButton.frame = NSMakeRect(534, 117, 116, 28);
-    [content addSubview:openSessionButton];
+    openSessionButton.frame = NSMakeRect(112, 250, 106, 28);
+    openSessionButton.autoresizingMask = NSViewMinYMargin | NSViewMaxXMargin;
+    [viewerView addSubview:openSessionButton];
 
     NSTextField *databaseLabel = [self labelWithString:@"Data"
-                                                 frame:NSMakeRect(24, 74, 80, 18)
+                                                 frame:NSMakeRect(24, 200, 80, 18)
                                                   font:[NSFont systemFontOfSize:13 weight:NSFontWeightMedium]
                                                  color:nil];
-    [content addSubview:databaseLabel];
+    databaseLabel.autoresizingMask = NSViewMinYMargin | NSViewMaxXMargin;
+    [viewerView addSubview:databaseLabel];
 
     NSButton *showDataButton = [NSButton buttonWithTitle:@"Show Data" target:self action:@selector(showData:)];
-    showDataButton.frame = NSMakeRect(20, 38, 92, 28);
-    [content addSubview:showDataButton];
+    showDataButton.frame = NSMakeRect(20, 164, 92, 28);
+    showDataButton.autoresizingMask = NSViewMinYMargin | NSViewMaxXMargin;
+    [viewerView addSubview:showDataButton];
 
     NSButton *exportButton = [NSButton buttonWithTitle:@"Export CSV" target:self action:@selector(exportCSV:)];
-    exportButton.frame = NSMakeRect(120, 38, 96, 28);
-    [content addSubview:exportButton];
+    exportButton.frame = NSMakeRect(120, 164, 96, 28);
+    exportButton.autoresizingMask = NSViewMinYMargin | NSViewMaxXMargin;
+    [viewerView addSubview:exportButton];
+
+    self.viewerStatusLabel = [self labelWithString:@"Select an annotated waveform."
+                                             frame:NSMakeRect(300, 410, 520, 18)
+                                              font:[NSFont systemFontOfSize:12]
+                                             color:[NSColor secondaryLabelColor]];
+    self.viewerStatusLabel.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
+    [viewerView addSubview:self.viewerStatusLabel];
+
+    self.waveformView = [[THWaveformView alloc] initWithFrame:NSMakeRect(300, 36, 540, 360)];
+    self.waveformView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    [viewerView addSubview:self.waveformView];
 
     [self updateOutputFolderLabel];
+    [self updateViewerFolderLabel];
 }
 
 - (void)togglePopover:(id)sender {
@@ -1248,6 +1408,9 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
     self.statusItem.button.toolTip = running ? @"ThumOS recorder is on" : @"ThumOS recorder is off";
     NSString *runningStatus = self.recordingStatusOverride.length > 0 ? self.recordingStatusOverride : @"Recording session.";
     NSString *stoppedStatus = self.recordingStatusOverride.length > 0 ? self.recordingStatusOverride : @"Recorder is stopped.";
+    NSColor *statusColor = self.recordingStatusIsError ? [NSColor systemRedColor] : [NSColor secondaryLabelColor];
+    self.popoverStatusLabel.textColor = statusColor;
+    self.windowStatusLabel.textColor = statusColor;
     self.popoverStatusLabel.stringValue = running ? runningStatus : stoppedStatus;
     self.windowStatusLabel.stringValue = running ? runningStatus : stoppedStatus;
      [self syncMuseControls];
@@ -1262,9 +1425,21 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
     NSSwitch *senderSwitch = [sender isKindOfClass:[NSSwitch class]] ? sender : nil;
     BOOL shouldRecord = senderSwitch.state == NSControlStateValueOn;
     if (shouldRecord) {
+        if (!self.museConnected) {
+            self.recordingStatusOverride = @"Muse headset is not connected.";
+            self.recordingStatusIsError = YES;
+            self.updatingSwitch = YES;
+            self.popoverRecordingSwitch.state = NSControlStateValueOff;
+            self.windowRecordingSwitch.state = NSControlStateValueOff;
+            self.updatingSwitch = NO;
+            [self refreshStatus];
+            return;
+        }
+
          NSString *permissionMessage = nil;
          if (![self ensureCreatorInputMonitoringAccessWithMessage:&permissionMessage]) {
             self.recordingStatusOverride = permissionMessage ?: @"Input Monitoring permission is required.";
+            self.recordingStatusIsError = YES;
              self.updatingSwitch = YES;
              self.popoverRecordingSwitch.state = NSControlStateValueOff;
              self.windowRecordingSwitch.state = NSControlStateValueOff;
@@ -1275,6 +1450,7 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
      }
 
     self.recordingStatusOverride = nil;
+    self.recordingStatusIsError = NO;
      self.popoverRecordingSwitch.enabled = NO;
     self.windowRecordingSwitch.enabled = NO;
     self.popoverStatusLabel.stringValue = shouldRecord ? @"Starting..." : @"Stopping...";
@@ -1286,8 +1462,10 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
     self.windowRecordingSwitch.enabled = YES;
     if (!success) {
         self.recordingStatusOverride = message ?: @"Error";
+        self.recordingStatusIsError = YES;
     } else {
         self.recordingStatusOverride = message;
+        self.recordingStatusIsError = NO;
         [self refreshSessionListSelectingPath:shouldRecord ? self.currentSessionDirectory : self.lastFinishedSessionDirectory];
     }
     [self refreshStatus];
@@ -1312,8 +1490,8 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
 
     NSString *creatorPath = [sessionDirectory stringByAppendingPathComponent:THCreatorEventsFilename()];
     NSString *annotationsPath = [sessionDirectory stringByAppendingPathComponent:THAnnotationsFilename()];
-    NSString *creatorHeader = @"timestamp_utc,monotonic_ns,device_name,command_id,event_type,key_code,raw_payload\n";
-    NSString *annotationsHeader = @"timestamp_utc,monotonic_ns,label,type,command_id\n";
+    NSString *creatorHeader = THCreatorEventsHeader();
+    NSString *annotationsHeader = THAnnotationsHeader();
 
     if (![creatorHeader writeToFile:creatorPath atomically:YES encoding:NSUTF8StringEncoding error:&error] ||
         ![annotationsHeader writeToFile:annotationsPath atomically:YES encoding:NSUTF8StringEncoding error:&error]) {
@@ -1657,6 +1835,11 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
     self.museConnected = connected;
     self.windowMuseStatusLabel.stringValue = message ?: @"Disconnected";
     self.popoverMuseStatusLabel.stringValue = message ?: @"Disconnected";
+    if (connected && [self.recordingStatusOverride isEqualToString:@"Muse headset is not connected."]) {
+        self.recordingStatusOverride = nil;
+        self.recordingStatusIsError = NO;
+        [self refreshStatus];
+    }
     [self syncMuseControls];
 }
 
@@ -1840,7 +2023,7 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
     NSError *error = nil;
     NSString *filename = THMuseEventsFilename();
     NSString *path = [self.currentSessionDirectory stringByAppendingPathComponent:filename];
-    NSString *header = @"recording_started_at_utc,sample_timestamp_utc,device_name,channel,channel_sample_index,value_uv\n";
+    NSString *header = THMuseEventsHeader();
     if (![header writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&error]) {
         [self setMuseStatus:error.localizedDescription ?: @"Could not create EEG CSV." connected:YES];
         return;
@@ -1902,7 +2085,15 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
 }
 
 - (void)disconnectMuse {
-    if (self.eegRecording || self.eegFileHandle != nil) {
+    BOOL stoppedSession = NO;
+    if ([self isRecording]) {
+        NSString *message = nil;
+        [self stopRecording:&message];
+        self.recordingStatusOverride = @"Stopped recording because Muse headset disconnected.";
+        self.recordingStatusIsError = YES;
+        [self refreshSessionListSelectingPath:self.lastFinishedSessionDirectory];
+        stoppedSession = YES;
+    } else if (self.eegRecording || self.eegFileHandle != nil) {
         [self stopEEGRecordingWithStatus:NO];
     } else if (self.museConnected && self.museStreaming) {
         [self writeMuseControlCommand:THMuseStopCommand()];
@@ -1925,6 +2116,9 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
     self.museConnected = NO;
     self.museStreaming = NO;
     [self setMuseStatus:@"Disconnected" connected:NO];
+    if (stoppedSession) {
+        [self refreshStatus];
+    }
 }
 
 - (void)toggleEEGRecording:(id)sender {
@@ -2022,7 +2216,15 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
         return;
     }
 
-    if (self.eegRecording || self.eegFileHandle != nil) {
+    BOOL stoppedSession = NO;
+    if ([self isRecording]) {
+        NSString *savedMessage = nil;
+        [self stopRecording:&savedMessage];
+        self.recordingStatusOverride = @"Stopped recording because Muse headset disconnected.";
+        self.recordingStatusIsError = YES;
+        [self refreshSessionListSelectingPath:self.lastFinishedSessionDirectory];
+        stoppedSession = YES;
+    } else if (self.eegRecording || self.eegFileHandle != nil) {
         [self stopEEGRecordingWithStatus:NO];
     }
 
@@ -2036,6 +2238,9 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
 
     NSString *message = error.localizedDescription ?: @"Disconnected";
     [self setMuseStatus:message connected:NO];
+    if (stoppedSession) {
+        [self refreshStatus];
+    }
 }
 
 - (void)peripheral:(CBPeripheral *)peripheral didDiscoverServices:(NSError *)error {
@@ -2262,6 +2467,13 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
         return YES;
     }
 
+    if (!self.museConnected) {
+        if (message != NULL) {
+            *message = @"Muse headset is not connected.";
+        }
+        return NO;
+    }
+
     if (![self ensureCreatorInputMonitoringAccessWithMessage:message]) {
         return NO;
     }
@@ -2293,10 +2505,14 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
           return NO;
       }
 
-    if (self.museConnected) {
-        [self startEEGRecording];
-    } else {
-        [self setMuseStatus:@"Muse not connected; recording Creator only." connected:NO];
+    [self startEEGRecording];
+    if (!self.eegRecording) {
+        if (message != NULL) {
+            NSString *museMessage = self.windowMuseStatusLabel.stringValue;
+            *message = museMessage.length > 0 ? museMessage : @"Could not start Muse EEG recording.";
+        }
+        [self stopRecording:nil];
+        return NO;
     }
 
     if (message != NULL) {
