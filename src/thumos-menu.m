@@ -5,6 +5,7 @@
 #import <IOKit/hidsystem/IOHIDLib.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <fcntl.h>
+#import <float.h>
 #import <math.h>
 #import <stdint.h>
 #import <sqlite3.h>
@@ -458,6 +459,37 @@ static NSString *THAnnotationsHeader(void) {
     return @"timestamp_utc,monotonic_ns,label,type,command_id\n";
 }
 
+static NSString *THClassifierDirectory(void) {
+    return [THApplicationSupportDirectory() stringByAppendingPathComponent:@"Classifier"];
+}
+
+static NSString *THClassifierModelPath(void) {
+    return [THClassifierDirectory() stringByAppendingPathComponent:@"thumos_mlp.json"];
+}
+
+static NSString *THBundledClassifierTrainerPath(void) {
+    NSString *resourcePath = [[NSBundle mainBundle] pathForResource:@"train_classifier" ofType:@"py" inDirectory:@"Model"];
+    if (resourcePath.length > 0) {
+        return resourcePath;
+    }
+
+    return [@"scripts/train_classifier.py" stringByStandardizingPath];
+}
+
+static NSString *THPythonLaunchPath(void) {
+    NSArray<NSString *> *candidates = @[
+        @"/opt/homebrew/bin/python3",
+        @"/usr/local/bin/python3",
+        @"/usr/bin/python3"
+    ];
+    for (NSString *path in candidates) {
+        if ([[NSFileManager defaultManager] isExecutableFileAtPath:path]) {
+            return path;
+        }
+    }
+    return @"/usr/bin/env";
+}
+
 static BOOL THAcquireSingleInstanceLock(NSError **error) {
     NSString *directory = THApplicationSupportDirectory();
     if (![[NSFileManager defaultManager] createDirectoryAtPath:directory
@@ -516,6 +548,10 @@ static NSString *THCSVField(NSString *value) {
 @property(nonatomic, strong) NSButton *popoverMuseButton;
 @property(nonatomic, strong) NSButton *windowMuseButton;
 @property(nonatomic, strong) NSTextField *windowOutputFolderLabel;
+@property(nonatomic, strong) NSButton *trainClassifierButton;
+@property(nonatomic, strong) NSTextField *classifierStatusLabel;
+@property(nonatomic, strong) NSButton *livePredictionButton;
+@property(nonatomic, strong) NSTextField *livePredictionLabel;
 @property(nonatomic, strong) NSTextField *viewerFolderLabel;
 @property(nonatomic, strong) NSTextField *viewerStatusLabel;
 @property(nonatomic, strong) NSPopUpButton *windowSessionPopup;
@@ -534,7 +570,10 @@ static NSString *THCSVField(NSString *value) {
 @property(nonatomic, strong) NSFileHandle *eegFileHandle;
 @property(nonatomic, copy) NSString *eegRecordingPath;
 @property(nonatomic, copy) NSString *eegRecordingStartedAtUTC;
+@property(nonatomic, strong) NSMutableDictionary<NSString *, NSMutableArray<NSDictionary *> *> *liveMuseSamplesByChannel;
+@property(nonatomic, strong) NSDictionary *classifierModel;
 @property(nonatomic, strong) NSTimer *refreshTimer;
+@property(nonatomic, strong) NSTimer *livePredictionTimer;
 @property(nonatomic, copy) NSString *recordingStatusOverride;
 @property(nonatomic, copy) NSString *sessionsRootPath;
 @property(nonatomic, copy) NSString *viewerSessionsRootPath;
@@ -551,6 +590,7 @@ static NSString *THCSVField(NSString *value) {
 @property(nonatomic) BOOL talkOpen;
 @property(nonatomic) BOOL recordingStatusIsError;
 @property(nonatomic) BOOL viewerFolderCustomized;
+@property(nonatomic) BOOL livePredictionEnabled;
 - (void)handleCreatorHIDValue:(IOHIDValueRef)value result:(IOReturn)result;
 - (void)refreshSessionListSelectingPath:(NSString *)preferredPath;
 - (NSString *)sessionDirectoryForActions;
@@ -560,6 +600,9 @@ static NSString *THCSVField(NSString *value) {
 - (void)selectViewerSession:(id)sender;
 - (void)openSelectedSessionFolder:(id)sender;
 - (void)startEEGRecording;
+- (void)trainClassifier:(id)sender;
+- (void)toggleLivePrediction:(id)sender;
+- (void)runLivePredictionTick:(NSTimer *)timer;
 - (NSImage *)crownStatusImageForRecording:(BOOL)recording;
 @end
 
@@ -607,6 +650,7 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
     self.museSampleIndexByChannel = [NSMutableDictionary dictionary];
     self.museDiscoveredEEGUUIDs = [NSMutableSet set];
     self.museNotifyingEEGUUIDs = [NSMutableSet set];
+    self.liveMuseSamplesByChannel = [NSMutableDictionary dictionary];
 }
 
 - (void)loadSessionsRoot {
@@ -1007,6 +1051,7 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
 - (void)applicationWillTerminate:(NSNotification *)notification {
     (void)notification;
     [self.refreshTimer invalidate];
+    [self.livePredictionTimer invalidate];
     [self stopRecording:nil];
     [self disconnectMuse];
 }
@@ -1258,6 +1303,44 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
                                                   color:[NSColor secondaryLabelColor]];
     self.windowOutputFolderLabel.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
     [controlView addSubview:self.windowOutputFolderLabel];
+
+    NSTextField *classifierLabel = [self labelWithString:@"Classifier"
+                                                   frame:NSMakeRect(24, 146, 180, 20)
+                                                    font:[NSFont systemFontOfSize:14 weight:NSFontWeightMedium]
+                                                   color:nil];
+    classifierLabel.autoresizingMask = NSViewMinYMargin | NSViewMaxXMargin;
+    [controlView addSubview:classifierLabel];
+
+    self.trainClassifierButton = [NSButton buttonWithTitle:@"Train Model" target:self action:@selector(trainClassifier:)];
+    self.trainClassifierButton.frame = NSMakeRect(704, 141, 126, 28);
+    self.trainClassifierButton.autoresizingMask = NSViewMinXMargin | NSViewMinYMargin;
+    [controlView addSubview:self.trainClassifierButton];
+
+    self.classifierStatusLabel = [self labelWithString:@"No classifier trained."
+                                                 frame:NSMakeRect(24, 122, 800, 18)
+                                                  font:[NSFont systemFontOfSize:12]
+                                                 color:[NSColor secondaryLabelColor]];
+    self.classifierStatusLabel.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
+    [controlView addSubview:self.classifierStatusLabel];
+
+    NSTextField *livePredictionTitle = [self labelWithString:@"Live Prediction"
+                                                       frame:NSMakeRect(24, 72, 180, 20)
+                                                        font:[NSFont systemFontOfSize:14 weight:NSFontWeightMedium]
+                                                       color:nil];
+    livePredictionTitle.autoresizingMask = NSViewMinYMargin | NSViewMaxXMargin;
+    [controlView addSubview:livePredictionTitle];
+
+    self.livePredictionButton = [NSButton buttonWithTitle:@"Start Live" target:self action:@selector(toggleLivePrediction:)];
+    self.livePredictionButton.frame = NSMakeRect(704, 67, 126, 28);
+    self.livePredictionButton.autoresizingMask = NSViewMinXMargin | NSViewMinYMargin;
+    [controlView addSubview:self.livePredictionButton];
+
+    self.livePredictionLabel = [self labelWithString:@"Train a classifier, then start recording to predict."
+                                               frame:NSMakeRect(24, 48, 800, 18)
+                                                font:[NSFont systemFontOfSize:12]
+                                               color:[NSColor secondaryLabelColor]];
+    self.livePredictionLabel.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
+    [controlView addSubview:self.livePredictionLabel];
 
     NSTabViewItem *viewerItem = [[NSTabViewItem alloc] initWithIdentifier:@"viewer"];
     viewerItem.label = @"Viewer";
@@ -1896,6 +1979,385 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
     }
 }
 
+- (NSDictionary *)classifierJSONFromTaskOutput:(NSString *)output {
+    NSData *data = [output dataUsingEncoding:NSUTF8StringEncoding];
+    if (data == nil) {
+        return nil;
+    }
+
+    id object = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    if ([object isKindOfClass:[NSDictionary class]]) {
+        return object;
+    }
+
+    NSArray<NSString *> *lines = [output componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
+    for (NSString *line in [lines reverseObjectEnumerator]) {
+        NSString *trimmed = [line stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (trimmed.length == 0) {
+            continue;
+        }
+
+        data = [trimmed dataUsingEncoding:NSUTF8StringEncoding];
+        object = data != nil ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+        if ([object isKindOfClass:[NSDictionary class]]) {
+            return object;
+        }
+    }
+
+    return nil;
+}
+
+- (BOOL)loadClassifierModelWithMessage:(NSString **)message {
+    NSString *path = THClassifierModelPath();
+    NSData *data = [NSData dataWithContentsOfFile:path];
+    if (data == nil) {
+        if (message != NULL) {
+            *message = @"No classifier model has been trained yet.";
+        }
+        return NO;
+    }
+
+    id object = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    if (![object isKindOfClass:[NSDictionary class]]) {
+        if (message != NULL) {
+            *message = @"Classifier model is unreadable.";
+        }
+        return NO;
+    }
+
+    NSDictionary *model = object;
+    if (![model[@"layers"] isKindOfClass:[NSArray class]] ||
+        ![model[@"input_mean"] isKindOfClass:[NSArray class]] ||
+        ![model[@"input_std"] isKindOfClass:[NSArray class]]) {
+        if (message != NULL) {
+            *message = @"Classifier model is missing weights.";
+        }
+        return NO;
+    }
+
+    self.classifierModel = model;
+    return YES;
+}
+
+- (void)trainClassifier:(id)sender {
+    (void)sender;
+    NSString *dataRoot = self.sessionsRootPath.length > 0 ? self.sessionsRootPath : THDefaultSessionsRootDirectory();
+    NSString *trainerPath = THBundledClassifierTrainerPath();
+    if (![[NSFileManager defaultManager] isReadableFileAtPath:trainerPath]) {
+        self.classifierStatusLabel.stringValue = @"Classifier trainer is missing from the app bundle.";
+        self.classifierStatusLabel.textColor = [NSColor systemRedColor];
+        return;
+    }
+
+    NSError *directoryError = nil;
+    if (![[NSFileManager defaultManager] createDirectoryAtPath:THClassifierDirectory()
+                                   withIntermediateDirectories:YES
+                                                    attributes:nil
+                                                         error:&directoryError]) {
+        self.classifierStatusLabel.stringValue = directoryError.localizedDescription ?: @"Could not create classifier folder.";
+        self.classifierStatusLabel.textColor = [NSColor systemRedColor];
+        return;
+    }
+
+    self.trainClassifierButton.enabled = NO;
+    self.classifierStatusLabel.textColor = [NSColor secondaryLabelColor];
+    self.classifierStatusLabel.stringValue = [NSString stringWithFormat:@"Training from %@...", [self displayPath:dataRoot]];
+
+    NSString *pythonPath = THPythonLaunchPath();
+    NSMutableArray<NSString *> *arguments = [NSMutableArray array];
+    if ([pythonPath isEqualToString:@"/usr/bin/env"]) {
+        [arguments addObject:@"python3"];
+    }
+    [arguments addObjectsFromArray:@[
+        trainerPath,
+        @"--data-root",
+        dataRoot,
+        @"--model-path",
+        THClassifierModelPath()
+    ]];
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        THTaskResult *result = THRunTask(pythonPath, arguments);
+        NSDictionary *payload = [self classifierJSONFromTaskOutput:result.output];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.trainClassifierButton.enabled = YES;
+            NSString *message = [payload[@"message"] isKindOfClass:[NSString class]] ? payload[@"message"] : result.output;
+            NSNumber *accuracy = [payload[@"test_accuracy"] isKindOfClass:[NSNumber class]] ? payload[@"test_accuracy"] : nil;
+            NSNumber *examples = [payload[@"num_examples"] isKindOfClass:[NSNumber class]] ? payload[@"num_examples"] : nil;
+            NSString *status = [payload[@"status"] isKindOfClass:[NSString class]] ? payload[@"status"] : @"error";
+
+            if ([status isEqualToString:@"kept"]) {
+                self.classifierStatusLabel.textColor = [NSColor secondaryLabelColor];
+                self.classifierStatusLabel.stringValue = [NSString stringWithFormat:@"Kept model. Test accuracy %.1f%% on %@ windows.",
+                                                                                   accuracy.doubleValue * 100.0,
+                                                                                   examples ?: @0];
+                [self loadClassifierModelWithMessage:nil];
+            } else if ([status isEqualToString:@"discarded"]) {
+                self.classifierStatusLabel.textColor = [NSColor secondaryLabelColor];
+                self.classifierStatusLabel.stringValue = [NSString stringWithFormat:@"Kept existing model. New test accuracy %.1f%% on %@ windows.",
+                                                                                   accuracy.doubleValue * 100.0,
+                                                                                   examples ?: @0];
+                [self loadClassifierModelWithMessage:nil];
+            } else {
+                self.classifierStatusLabel.textColor = [NSColor systemRedColor];
+                self.classifierStatusLabel.stringValue = message.length > 0 ? message : @"Classifier training failed.";
+            }
+        });
+    });
+}
+
+- (void)toggleLivePrediction:(id)sender {
+    (void)sender;
+    if (self.livePredictionEnabled) {
+        self.livePredictionEnabled = NO;
+        [self.livePredictionTimer invalidate];
+        self.livePredictionTimer = nil;
+        if (!self.eegRecording && self.museConnected && self.museStreaming) {
+            [self writeMuseControlCommand:THMuseStopCommand()];
+            self.museStreaming = NO;
+        }
+        self.livePredictionButton.title = @"Start Live";
+        self.livePredictionLabel.textColor = [NSColor secondaryLabelColor];
+        self.livePredictionLabel.stringValue = @"Live prediction stopped.";
+        return;
+    }
+
+    if (!self.museConnected) {
+        self.livePredictionLabel.textColor = [NSColor systemRedColor];
+        self.livePredictionLabel.stringValue = @"Connect Muse before live prediction.";
+        return;
+    }
+
+    NSString *message = nil;
+    if (![self loadClassifierModelWithMessage:&message]) {
+        self.livePredictionLabel.textColor = [NSColor systemRedColor];
+        self.livePredictionLabel.stringValue = message ?: @"No classifier model has been trained yet.";
+        return;
+    }
+
+    if (!self.museStreaming && ![self writeMuseControlCommand:THMuseStartCommand()]) {
+        self.livePredictionLabel.textColor = [NSColor systemRedColor];
+        self.livePredictionLabel.stringValue = @"Could not start Muse stream for live prediction.";
+        return;
+    }
+
+    self.museStreaming = YES;
+    [self.liveMuseSamplesByChannel removeAllObjects];
+    self.livePredictionEnabled = YES;
+    self.livePredictionButton.title = @"Stop Live";
+    self.livePredictionLabel.textColor = [NSColor secondaryLabelColor];
+    self.livePredictionLabel.stringValue = @"Waiting for Muse EEG window...";
+    self.livePredictionTimer = [NSTimer scheduledTimerWithTimeInterval:0.75
+                                                                target:self
+                                                              selector:@selector(runLivePredictionTick:)
+                                                              userInfo:nil
+                                                               repeats:YES];
+    [self runLivePredictionTick:self.livePredictionTimer];
+}
+
+- (void)stopLivePredictionAfterDisconnect {
+    if (!self.livePredictionEnabled && self.livePredictionTimer == nil) {
+        return;
+    }
+
+    self.livePredictionEnabled = NO;
+    [self.livePredictionTimer invalidate];
+    self.livePredictionTimer = nil;
+    self.livePredictionButton.title = @"Start Live";
+    self.livePredictionLabel.textColor = [NSColor secondaryLabelColor];
+    self.livePredictionLabel.stringValue = @"Live prediction stopped because Muse disconnected.";
+}
+
+- (void)rememberLiveMuseSamples:(NSArray<NSNumber *> *)samples channel:(NSString *)channel timestamp:(NSDate *)timestamp {
+    if (samples.count == 0 || channel.length == 0) {
+        return;
+    }
+
+    if (self.liveMuseSamplesByChannel == nil) {
+        self.liveMuseSamplesByChannel = [NSMutableDictionary dictionary];
+    }
+
+    NSMutableArray<NSDictionary *> *channelSamples = self.liveMuseSamplesByChannel[channel];
+    if (channelSamples == nil) {
+        channelSamples = [NSMutableArray array];
+        self.liveMuseSamplesByChannel[channel] = channelSamples;
+    }
+
+    NSTimeInterval seconds = [timestamp timeIntervalSinceReferenceDate];
+    for (NSNumber *sample in samples) {
+        [channelSamples addObject:@{@"t": @(seconds), @"v": sample}];
+    }
+
+    NSTimeInterval cutoff = seconds - 12.0;
+    NSIndexSet *oldIndexes = [channelSamples indexesOfObjectsPassingTest:^BOOL(NSDictionary *sample, NSUInteger index, BOOL *stop) {
+        (void)index;
+        (void)stop;
+        return [sample[@"t"] doubleValue] < cutoff;
+    }];
+    if (oldIndexes.count > 0) {
+        [channelSamples removeObjectsAtIndexes:oldIndexes];
+    }
+}
+
+- (NSArray<NSNumber *> *)featuresForValues:(NSArray<NSNumber *> *)values {
+    double sum = 0.0;
+    double sumSquares = 0.0;
+    double minValue = DBL_MAX;
+    double maxValue = -DBL_MAX;
+    for (NSNumber *number in values) {
+        double value = number.doubleValue;
+        sum += value;
+        sumSquares += value * value;
+        minValue = MIN(minValue, value);
+        maxValue = MAX(maxValue, value);
+    }
+
+    double count = (double)values.count;
+    double mean = sum / count;
+    double variance = MAX(0.0, (sumSquares / count) - mean * mean);
+    double std = sqrt(variance);
+    double rms = sqrt(sumSquares / count);
+    return @[@(mean), @(std), @(minValue), @(maxValue), @(rms), @(maxValue - minValue)];
+}
+
+- (NSArray<NSNumber *> *)liveFeatureVectorWithMessage:(NSString **)message {
+    NSDictionary *window = self.classifierModel[@"window"];
+    double startBefore = [window[@"start_before_seconds"] isKindOfClass:[NSNumber class]] ? [window[@"start_before_seconds"] doubleValue] : 2.5;
+    double endBefore = [window[@"end_before_seconds"] isKindOfClass:[NSNumber class]] ? [window[@"end_before_seconds"] doubleValue] : 0.5;
+    NSUInteger minSamples = [window[@"min_samples_per_channel"] isKindOfClass:[NSNumber class]] ? [window[@"min_samples_per_channel"] unsignedIntegerValue] : 8;
+    NSTimeInterval now = [[NSDate date] timeIntervalSinceReferenceDate];
+    NSTimeInterval windowStart = now - startBefore;
+    NSTimeInterval windowEnd = now - endBefore;
+
+    NSArray<NSString *> *channels = [self.classifierModel[@"channels"] isKindOfClass:[NSArray class]] ? self.classifierModel[@"channels"] : @[@"TP9", @"AF7", @"AF8", @"TP10"];
+    NSMutableArray<NSNumber *> *features = [NSMutableArray array];
+    for (NSString *channel in channels) {
+        NSMutableArray<NSNumber *> *values = [NSMutableArray array];
+        for (NSDictionary *sample in self.liveMuseSamplesByChannel[channel]) {
+            double timestamp = [sample[@"t"] doubleValue];
+            if (timestamp >= windowStart && timestamp <= windowEnd) {
+                [values addObject:sample[@"v"]];
+            }
+        }
+
+        if (values.count < minSamples) {
+            if (message != NULL) {
+                *message = @"Waiting for enough Muse samples.";
+            }
+            return nil;
+        }
+        [features addObjectsFromArray:[self featuresForValues:values]];
+    }
+    return features;
+}
+
+- (NSArray<NSNumber *> *)classifierProbabilitiesForFeatures:(NSArray<NSNumber *> *)features message:(NSString **)message {
+    NSArray<NSNumber *> *inputMean = self.classifierModel[@"input_mean"];
+    NSArray<NSNumber *> *inputStd = self.classifierModel[@"input_std"];
+    NSArray<NSDictionary *> *layers = self.classifierModel[@"layers"];
+    if (features.count != inputMean.count || features.count != inputStd.count || layers.count == 0) {
+        if (message != NULL) {
+            *message = @"Classifier model shape does not match live features.";
+        }
+        return nil;
+    }
+
+    NSMutableArray<NSNumber *> *activations = [NSMutableArray arrayWithCapacity:features.count];
+    for (NSUInteger index = 0; index < features.count; index++) {
+        double std = MAX([inputStd[index] doubleValue], 1e-6);
+        [activations addObject:@(([features[index] doubleValue] - [inputMean[index] doubleValue]) / std)];
+    }
+
+    for (NSDictionary *layer in layers) {
+        NSArray<NSArray<NSNumber *> *> *weights = layer[@"weight"];
+        NSArray<NSNumber *> *bias = layer[@"bias"];
+        NSString *activation = layer[@"activation"];
+        NSMutableArray<NSNumber *> *next = [NSMutableArray arrayWithCapacity:weights.count];
+        for (NSUInteger rowIndex = 0; rowIndex < weights.count; rowIndex++) {
+            NSArray<NSNumber *> *row = weights[rowIndex];
+            double value = rowIndex < bias.count ? [bias[rowIndex] doubleValue] : 0.0;
+            for (NSUInteger columnIndex = 0; columnIndex < row.count && columnIndex < activations.count; columnIndex++) {
+                value += [row[columnIndex] doubleValue] * [activations[columnIndex] doubleValue];
+            }
+            if ([activation isEqualToString:@"relu"]) {
+                value = MAX(0.0, value);
+            }
+            [next addObject:@(value)];
+        }
+        activations = next;
+    }
+
+    double maxLogit = -DBL_MAX;
+    for (NSNumber *logit in activations) {
+        maxLogit = MAX(maxLogit, logit.doubleValue);
+    }
+    double sum = 0.0;
+    NSMutableArray<NSNumber *> *expValues = [NSMutableArray arrayWithCapacity:activations.count];
+    for (NSNumber *logit in activations) {
+        double expValue = exp(logit.doubleValue - maxLogit);
+        sum += expValue;
+        [expValues addObject:@(expValue)];
+    }
+
+    NSMutableArray<NSNumber *> *probabilities = [NSMutableArray arrayWithCapacity:expValues.count];
+    for (NSNumber *expValue in expValues) {
+        [probabilities addObject:@(expValue.doubleValue / MAX(sum, 1e-9))];
+    }
+    return probabilities;
+}
+
+- (void)runLivePredictionTick:(NSTimer *)timer {
+    (void)timer;
+    if (!self.livePredictionEnabled) {
+        return;
+    }
+
+    if (!self.museStreaming) {
+        self.livePredictionLabel.textColor = [NSColor secondaryLabelColor];
+        self.livePredictionLabel.stringValue = @"Start live prediction to stream Muse samples.";
+        return;
+    }
+
+    NSString *message = nil;
+    if (self.classifierModel == nil && ![self loadClassifierModelWithMessage:&message]) {
+        self.livePredictionLabel.textColor = [NSColor systemRedColor];
+        self.livePredictionLabel.stringValue = message ?: @"No classifier model has been trained yet.";
+        return;
+    }
+
+    NSArray<NSNumber *> *features = [self liveFeatureVectorWithMessage:&message];
+    if (features == nil) {
+        self.livePredictionLabel.textColor = [NSColor secondaryLabelColor];
+        self.livePredictionLabel.stringValue = message ?: @"Waiting for Muse EEG window.";
+        return;
+    }
+
+    NSArray<NSNumber *> *probabilities = [self classifierProbabilitiesForFeatures:features message:&message];
+    NSArray<NSString *> *classes = self.classifierModel[@"classes"];
+    if (probabilities == nil || classes.count != probabilities.count) {
+        self.livePredictionLabel.textColor = [NSColor systemRedColor];
+        self.livePredictionLabel.stringValue = message ?: @"Classifier prediction failed.";
+        return;
+    }
+
+    NSUInteger bestIndex = 0;
+    for (NSUInteger index = 1; index < probabilities.count; index++) {
+        if ([probabilities[index] doubleValue] > [probabilities[bestIndex] doubleValue]) {
+            bestIndex = index;
+        }
+    }
+
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    for (NSUInteger index = 0; index < classes.count; index++) {
+        [parts addObject:[NSString stringWithFormat:@"%@ %.0f%%", classes[index], [probabilities[index] doubleValue] * 100.0]];
+    }
+
+    self.livePredictionLabel.textColor = [NSColor secondaryLabelColor];
+    self.livePredictionLabel.stringValue = [NSString stringWithFormat:@"Prediction: %@   %@",
+                                                                        classes[bestIndex],
+                                                                        [parts componentsJoinedByString:@"  "]];
+}
+
 - (void)connectMuse {
     if ([self isMuseRunning]) {
         return;
@@ -2009,7 +2471,12 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
 }
 
 - (void)appendMuseSamples:(NSArray<NSNumber *> *)samples channel:(NSString *)channel timestamp:(NSDate *)timestamp {
-    if (self.eegFileHandle == nil || samples.count == 0 || channel.length == 0) {
+    if (samples.count == 0 || channel.length == 0) {
+        return;
+    }
+
+    [self rememberLiveMuseSamples:samples channel:channel timestamp:timestamp];
+    if (self.eegFileHandle == nil) {
         return;
     }
 
@@ -2079,7 +2546,7 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
     self.eegRecordingStartedAtUTC = THISODateString([NSDate date]);
     [self.museSampleIndexByChannel removeAllObjects];
 
-    if (![self writeMuseControlCommand:THMuseStartCommand()]) {
+    if (!self.museStreaming && ![self writeMuseControlCommand:THMuseStartCommand()]) {
         [self.eegFileHandle closeFile];
         self.eegFileHandle = nil;
         self.eegRecordingPath = nil;
@@ -2096,10 +2563,13 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
     NSString *path = self.eegRecordingPath;
     BOOL hadRecording = self.eegRecording || self.eegFileHandle != nil;
 
-    if (self.museConnected && self.museStreaming) {
+    BOOL shouldStopStream = self.museConnected && self.museStreaming && !self.livePredictionEnabled;
+    if (shouldStopStream) {
         [self writeMuseControlCommand:THMuseStopCommand()];
     }
-    self.museStreaming = NO;
+    if (shouldStopStream) {
+        self.museStreaming = NO;
+    }
     self.eegRecording = NO;
 
     if (self.eegFileHandle != nil) {
@@ -2153,6 +2623,7 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
     self.museConnecting = NO;
     self.museConnected = NO;
     self.museStreaming = NO;
+    [self stopLivePredictionAfterDisconnect];
     [self setMuseStatus:@"Disconnected" connected:NO];
     if (stoppedSession) {
         [self refreshStatus];
@@ -2273,6 +2744,7 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
     self.museConnecting = NO;
     self.museConnected = NO;
     self.museStreaming = NO;
+    [self stopLivePredictionAfterDisconnect];
 
     NSString *message = error.localizedDescription ?: @"Disconnected";
     [self setMuseStatus:message connected:NO];
@@ -2387,7 +2859,7 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
 }
 
 - (void)peripheral:(CBPeripheral *)peripheral didUpdateValueForCharacteristic:(CBCharacteristic *)characteristic error:(NSError *)error {
-    if (peripheral != self.musePeripheral || error != nil || !self.eegRecording) {
+    if (peripheral != self.musePeripheral || error != nil) {
         return;
     }
 

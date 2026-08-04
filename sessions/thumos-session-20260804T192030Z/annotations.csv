@@ -1,0 +1,10 @@
+timestamp_utc,monotonic_ns,label,type,command_id
+2026-08-04T19:20:34.534Z,2434296086744,yes,yes,keyboard.return
+2026-08-04T19:20:37.875Z,2434376197436,no,no,keyboard.return
+2026-08-04T19:20:40.999Z,2434451246339,no,no,keyboard.return
+2026-08-04T19:20:46.017Z,2434571677300,no,no,keyboard.return
+2026-08-04T19:20:46.204Z,2434576165415,no,no,keyboard.return
+2026-08-04T19:20:50.203Z,2434672141998,no,no,keyboard.return
+2026-08-04T19:20:52.988Z,2434738933046,no,no,keyboard.return
+2026-08-04T19:20:53.065Z,2434740829006,no,no,keyboard.return
+2026-08-04T19:20:55.814Z,2434806806109,no,no,keyboard.return

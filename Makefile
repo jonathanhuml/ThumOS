@@ -7,6 +7,8 @@ APP_BIN := $(APP)/Contents/MacOS/ThumOS
 APP_DAEMON := $(APP)/Contents/MacOS/thumosd
 APP_INFO := $(APP)/Contents/Info.plist
 APP_ICON := $(APP)/Contents/Resources/ThumOS.icns
+APP_MODEL_DIR := $(APP)/Contents/Resources/Model
+TRAINER_SRC := scripts/train_classifier.py
 ICON_SRC := scripts/render-app-icon.m
 ICON_RENDERER := $(BUILD_DIR)/render-app-icon
 ICONSET := $(BUILD_DIR)/ThumOS.iconset
@@ -38,8 +40,8 @@ $(ICON_RENDERER): $(ICON_SRC)
 $(ICON): $(ICON_RENDERER)
 	"$(ICON_RENDERER)" "$(ICONSET)" "$(ICON)"
 
-app: $(BIN) $(UI_SRC) packaging/ThumOS-Info.plist $(ICON)
-	mkdir -p "$(APP)/Contents/MacOS" "$(APP)/Contents/Resources" $(CLANG_MODULE_CACHE_PATH)
+app: $(BIN) $(UI_SRC) packaging/ThumOS-Info.plist $(ICON) $(TRAINER_SRC)
+	mkdir -p "$(APP)/Contents/MacOS" "$(APP)/Contents/Resources" "$(APP_MODEL_DIR)" $(CLANG_MODULE_CACHE_PATH)
 	clang -fobjc-arc -Wall -Wextra -Werror -ObjC \
 		-framework Foundation \
 		-framework AppKit \
@@ -51,6 +53,7 @@ app: $(BIN) $(UI_SRC) packaging/ThumOS-Info.plist $(ICON)
 	cp "$(BIN)" "$(APP_DAEMON)"
 	cp packaging/ThumOS-Info.plist "$(APP_INFO)"
 	cp "$(ICON)" "$(APP_ICON)"
+	cp "$(TRAINER_SRC)" "$(APP_MODEL_DIR)/train_classifier.py"
 	codesign --force --sign - --identifier io.thumos.daemon --requirements '=designated => identifier "io.thumos.daemon"' "$(APP_DAEMON)"
 	codesign --force --sign - --requirements '=designated => identifier "io.thumos.menu"' "$(APP)"
 
