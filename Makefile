@@ -6,6 +6,11 @@ APP := $(BUILD_DIR)/ThumOS.app
 APP_BIN := $(APP)/Contents/MacOS/ThumOS
 APP_DAEMON := $(APP)/Contents/MacOS/thumosd
 APP_INFO := $(APP)/Contents/Info.plist
+APP_ICON := $(APP)/Contents/Resources/ThumOS.icns
+ICON_SRC := scripts/render-app-icon.m
+ICON_RENDERER := $(BUILD_DIR)/render-app-icon
+ICONSET := $(BUILD_DIR)/ThumOS.iconset
+ICON := $(BUILD_DIR)/ThumOS.icns
 
 export CLANG_MODULE_CACHE_PATH := $(BUILD_DIR)/module-cache
 
@@ -23,7 +28,17 @@ $(BIN): $(SRC)
 		-lsqlite3 \
 		$(SRC) -o $(BIN)
 
-app: $(BIN) $(UI_SRC) packaging/ThumOS-Info.plist
+$(ICON_RENDERER): $(ICON_SRC)
+	mkdir -p $(BUILD_DIR) $(CLANG_MODULE_CACHE_PATH)
+	clang -fobjc-arc -Wall -Wextra -Werror -ObjC \
+		-framework Foundation \
+		-framework AppKit \
+		$(ICON_SRC) -o "$(ICON_RENDERER)"
+
+$(ICON): $(ICON_RENDERER)
+	"$(ICON_RENDERER)" "$(ICONSET)" "$(ICON)"
+
+app: $(BIN) $(UI_SRC) packaging/ThumOS-Info.plist $(ICON)
 	mkdir -p "$(APP)/Contents/MacOS" "$(APP)/Contents/Resources" $(CLANG_MODULE_CACHE_PATH)
 	clang -fobjc-arc -Wall -Wextra -Werror -ObjC \
 		-framework Foundation \
@@ -35,6 +50,7 @@ app: $(BIN) $(UI_SRC) packaging/ThumOS-Info.plist
 		$(UI_SRC) -o "$(APP_BIN)"
 	cp "$(BIN)" "$(APP_DAEMON)"
 	cp packaging/ThumOS-Info.plist "$(APP_INFO)"
+	cp "$(ICON)" "$(APP_ICON)"
 	codesign --force --sign - --identifier io.thumos.daemon --requirements '=designated => identifier "io.thumos.daemon"' "$(APP_DAEMON)"
 	codesign --force --sign - --requirements '=designated => identifier "io.thumos.menu"' "$(APP)"
 

@@ -502,6 +502,7 @@ static NSString *THCSVField(NSString *value) {
 - (BOOL)sessionDirectoryHasData:(NSString *)path;
 - (void)openSelectedSessionFolder:(id)sender;
 - (void)startEEGRecording;
+- (NSImage *)crownStatusImageForRecording:(BOOL)recording;
 @end
 
 static void THCreatorHIDValueCallback(void *context, IOReturn result, void *sender, IOHIDValueRef value) {
@@ -910,11 +911,52 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
 }
 
 - (void)buildStatusItem {
-    self.statusItem = [[NSStatusBar systemStatusBar] statusItemWithLength:NSVariableStatusItemLength];
-    self.statusItem.button.title = @"ThumOS";
+    self.statusItem = [[NSStatusBar systemStatusBar] statusItemWithLength:NSSquareStatusItemLength];
+    self.statusItem.button.title = @"";
+    self.statusItem.button.image = [self crownStatusImageForRecording:NO];
+    self.statusItem.button.imagePosition = NSImageOnly;
     self.statusItem.button.toolTip = @"ThumOS recorder";
     self.statusItem.button.target = self;
     self.statusItem.button.action = @selector(togglePopover:);
+}
+
+- (NSImage *)crownStatusImageForRecording:(BOOL)recording {
+    NSImage *image = [[NSImage alloc] initWithSize:NSMakeSize(18, 18)];
+    [image lockFocus];
+
+    [[NSColor clearColor] setFill];
+    NSRectFill(NSMakeRect(0, 0, 18, 18));
+    [[NSColor blackColor] setStroke];
+    [[NSColor blackColor] setFill];
+
+    NSBezierPath *crown = [NSBezierPath bezierPath];
+    [crown moveToPoint:NSMakePoint(3.4, 4.6)];
+    [crown lineToPoint:NSMakePoint(3.4, 13.2)];
+    [crown lineToPoint:NSMakePoint(6.8, 8.8)];
+    [crown lineToPoint:NSMakePoint(9.0, 14.8)];
+    [crown lineToPoint:NSMakePoint(11.2, 8.8)];
+    [crown lineToPoint:NSMakePoint(14.6, 13.2)];
+    [crown lineToPoint:NSMakePoint(14.6, 4.6)];
+    [crown closePath];
+    crown.lineWidth = 1.35;
+    crown.lineJoinStyle = NSLineJoinStyleRound;
+    if (recording) {
+        [crown fill];
+    }
+    [crown stroke];
+
+    NSBezierPath *base = [NSBezierPath bezierPathWithRoundedRect:NSMakeRect(3.0, 2.5, 12.0, 2.8)
+                                                         xRadius:1.0
+                                                         yRadius:1.0];
+    base.lineWidth = 1.25;
+    if (recording) {
+        [base fill];
+    }
+    [base stroke];
+
+    [image unlockFocus];
+    image.template = YES;
+    return image;
 }
 
 - (NSTextField *)labelWithString:(NSString *)string frame:(NSRect)frame font:(NSFont *)font color:(NSColor *)color {
@@ -1201,7 +1243,9 @@ static void THCreatorHIDValueCallback(void *context, IOReturn result, void *send
     self.popoverRecordingSwitch.state = running ? NSControlStateValueOn : NSControlStateValueOff;
     self.windowRecordingSwitch.state = running ? NSControlStateValueOn : NSControlStateValueOff;
     self.updatingSwitch = NO;
-    self.statusItem.button.title = running ? @"ThumOS On" : @"ThumOS Off";
+    self.statusItem.button.title = @"";
+    self.statusItem.button.image = [self crownStatusImageForRecording:running];
+    self.statusItem.button.toolTip = running ? @"ThumOS recorder is on" : @"ThumOS recorder is off";
     NSString *runningStatus = self.recordingStatusOverride.length > 0 ? self.recordingStatusOverride : @"Recording session.";
     NSString *stoppedStatus = self.recordingStatusOverride.length > 0 ? self.recordingStatusOverride : @"Recorder is stopped.";
     self.popoverStatusLabel.stringValue = running ? runningStatus : stoppedStatus;

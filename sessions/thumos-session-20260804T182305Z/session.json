@@ -2,7 +2,7 @@
   "annotations" : "annotations.csv",
   "creator_events" : "creator-events.csv",
   "format_version" : 1,
-  "session_folder" : "thumos-session-20260804T181150Z",
-  "started_at_utc" : "2026-08-04T18:11:50.248Z",
+  "session_folder" : "thumos-session-20260804T182305Z",
+  "started_at_utc" : "2026-08-04T18:23:05.267Z",
   "muse_eeg" : "muse-eeg.csv"
 }
