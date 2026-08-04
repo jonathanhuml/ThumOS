@@ -28,7 +28,9 @@ app: $(BIN) $(UI_SRC) packaging/ThumOS-Info.plist
 	clang -fobjc-arc -Wall -Wextra -Werror -ObjC \
 		-framework Foundation \
 		-framework AppKit \
+		-framework CoreBluetooth \
 		-framework UniformTypeIdentifiers \
+		-lsqlite3 \
 		$(UI_SRC) -o "$(APP_BIN)"
 	cp "$(BIN)" "$(APP_DAEMON)"
 	cp packaging/ThumOS-Info.plist "$(APP_INFO)"

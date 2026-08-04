@@ -18,5 +18,9 @@
   <string>10.15</string>
   <key>NSPrincipalClass</key>
   <string>NSApplication</string>
+  <key>NSBluetoothAlwaysUsageDescription</key>
+  <string>ThumOS connects to Muse headsets over Bluetooth to stream and record EEG when you turn EEG recording on.</string>
+  <key>NSBluetoothPeripheralUsageDescription</key>
+  <string>ThumOS connects to Muse headsets over Bluetooth to stream and record EEG when you turn EEG recording on.</string>
 </dict>
 </plist>
