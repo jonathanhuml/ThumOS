@@ -73,14 +73,15 @@ ThumOS opens as a normal macOS app and also appears in the menu bar.
 - The menu-bar item opens a compact popover with the same recording controls.
 - Closing the window hides it; the app keeps running.
 - Quitting ThumOS from the app menu exits the UI, so the menu-bar item disappears.
-- Recording is controlled by the app. Turning it on starts a small bundled `thumosd` recorder process; turning it off stops that process.
+- Recording is controlled by the app. Turning it on starts an in-process Creator HID monitor; turning it off closes that monitor.
+- macOS must allow ThumOS in `System Settings > Privacy & Security > Input Monitoring` for Creator Recording.
 - `Show Data` opens a read-only view of recent events.
 - `Export CSV` saves the event log to a CSV file.
 - `Clear Events` deletes recorded rows from the local database.
 - `Connect Muse` uses native CoreBluetooth to find and prepare a Muse headset.
 - `EEG Recording` starts the Muse EEG stream and writes raw EEG to CSV only while that switch is on.
 
-The app bundle includes its own copy of `thumosd` at:
+The app bundle includes its own copy of `thumosd` for command-line diagnostics at:
 
 ```text
 build/ThumOS.app/Contents/MacOS/thumosd

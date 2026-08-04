@@ -2,6 +2,7 @@
 #import <ApplicationServices/ApplicationServices.h>
 #import <Foundation/Foundation.h>
 #import <IOKit/hid/IOHIDLib.h>
+#import <IOKit/hidsystem/IOHIDLib.h>
 #import <sqlite3.h>
 #import <time.h>
 
@@ -281,7 +282,30 @@ static BOOL THHIDShouldPrintUsage(uint32_t usagePage, uint32_t usage) {
     return usagePage == 0x07 || usagePage == 0x09 || usagePage == 0x0c;
 }
 
+static BOOL THHIDListenAccessGranted(NSError **error) {
+    IOHIDAccessType access = IOHIDCheckAccess(kIOHIDRequestTypeListenEvent);
+    if (access == kIOHIDAccessTypeGranted) {
+        return YES;
+    }
+
+    if (error != NULL) {
+        NSString *message = access == kIOHIDAccessTypeDenied
+            ? @"Input Monitoring permission is denied for HID recording. Enable ThumOS in System Settings > Privacy & Security > Input Monitoring."
+            : @"Input Monitoring permission is required for HID recording.";
+        *error = [NSError errorWithDomain:@"ThumOSHID"
+                                     code:kIOReturnNotPermitted
+                                 userInfo:@{NSLocalizedDescriptionKey: message}];
+    }
+    return NO;
+}
+
 static int THListHIDDevices(void) {
+    NSError *error = nil;
+    if (!THHIDListenAccessGranted(&error)) {
+        THPrintError([NSString stringWithFormat:@"thumosd: %@", error.localizedDescription]);
+        return 1;
+    }
+
     IOHIDManagerRef manager = IOHIDManagerCreate(kCFAllocatorDefault, kIOHIDOptionsTypeNone);
     if (manager == NULL) {
         THPrintError(@"thumosd: could not create IOHIDManager.");
@@ -854,12 +878,16 @@ static void THHIDValueCallback(void *context, IOReturn result, void *sender, IOH
         _recordEvents = recordEvents;
     }
     return self;
-}
+  }
 
-- (BOOL)start:(NSError **)error {
-    _manager = IOHIDManagerCreate(kCFAllocatorDefault, kIOHIDOptionsTypeNone);
-    if (_manager == NULL) {
-        if (error != NULL) {
+  - (BOOL)start:(NSError **)error {
+      if (!THHIDListenAccessGranted(error)) {
+          return NO;
+      }
+
+      _manager = IOHIDManagerCreate(kCFAllocatorDefault, kIOHIDOptionsTypeNone);
+      if (_manager == NULL) {
+          if (error != NULL) {
             *error = [NSError errorWithDomain:@"ThumOSHID"
                                          code:1
                                      userInfo:@{NSLocalizedDescriptionKey: @"Could not create IOHIDManager."}];

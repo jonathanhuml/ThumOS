@@ -18,6 +18,8 @@
   <string>10.15</string>
   <key>NSPrincipalClass</key>
   <string>NSApplication</string>
+  <key>NSInputMonitoringUsageDescription</key>
+  <string>ThumOS reads Creator Micro hardware button input so it can record Creator-origin commands and toggle EEG recording.</string>
   <key>NSBluetoothAlwaysUsageDescription</key>
   <string>ThumOS connects to Muse headsets over Bluetooth to stream and record EEG when you turn EEG recording on.</string>
   <key>NSBluetoothPeripheralUsageDescription</key>
