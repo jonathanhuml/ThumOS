@@ -63,7 +63,7 @@ static int gInstanceLockFD = -1;
     CGFloat left = 58.0;
     CGFloat right = 18.0;
     CGFloat top = 22.0;
-    CGFloat bottom = 28.0;
+    CGFloat bottom = 72.0;
     NSRect plotRect = NSMakeRect(left,
                                  top,
                                  MAX(10.0, self.bounds.size.width - left - right),
@@ -73,7 +73,9 @@ static int gInstanceLockFD = -1;
     NSDictionary *labelAttributes = @{NSFontAttributeName: [NSFont systemFontOfSize:11 weight:NSFontWeightMedium],
                                       NSForegroundColorAttributeName: [NSColor secondaryLabelColor]};
     NSDictionary *annotationAttributes = @{NSFontAttributeName: [NSFont systemFontOfSize:10 weight:NSFontWeightSemibold],
-                                           NSForegroundColorAttributeName: [NSColor systemRedColor]};
+                                           NSForegroundColorAttributeName: [NSColor blackColor]};
+    NSColor *waveformColor = [NSColor systemBlueColor];
+    NSColor *annotationColor = [[NSColor blackColor] colorWithAlphaComponent:0.72];
 
     [[NSColor separatorColor] setStroke];
     for (NSUInteger index = 0; index < self.channels.count; index++) {
@@ -96,13 +98,6 @@ static int gInstanceLockFD = -1;
         double maxAbs = MAX([maxAbsByChannel[channel] doubleValue], fabs(value));
         maxAbsByChannel[channel] = @(maxAbs);
     }
-
-    NSArray<NSColor *> *colors = @[
-        [NSColor systemBlueColor],
-        [NSColor systemGreenColor],
-        [NSColor systemOrangeColor],
-        [NSColor systemPurpleColor]
-    ];
 
     for (NSUInteger channelIndex = 0; channelIndex < self.channels.count; channelIndex++) {
         NSString *channel = self.channels[channelIndex];
@@ -129,34 +124,77 @@ static int gInstanceLockFD = -1;
             }
         }
 
-        [colors[channelIndex % colors.count] setStroke];
-        path.lineWidth = 1.0;
+        [waveformColor setStroke];
+        path.lineWidth = 1.2;
         [path stroke];
     }
 
+    NSMutableArray<NSDictionary *> *visibleAnnotations = [NSMutableArray array];
     for (NSDictionary *annotation in self.annotations) {
         double seconds = [annotation[@"seconds"] doubleValue];
         if (seconds < 0.0 || seconds > self.duration) {
             continue;
         }
+        [visibleAnnotations addObject:annotation];
+    }
+
+    [visibleAnnotations sortUsingComparator:^NSComparisonResult(NSDictionary *first, NSDictionary *second) {
+        double firstSeconds = [first[@"seconds"] doubleValue];
+        double secondSeconds = [second[@"seconds"] doubleValue];
+        if (firstSeconds < secondSeconds) {
+            return NSOrderedAscending;
+        }
+        if (firstSeconds > secondSeconds) {
+            return NSOrderedDescending;
+        }
+        return NSOrderedSame;
+    }];
+
+    CGFloat labelGap = 5.0;
+    CGFloat labelBandY = NSMaxY(plotRect) + 7.0;
+    CGFloat maxLabelRight = NSMaxX(plotRect);
+    CGFloat labelRightEdge = plotRect.origin.x;
+
+    for (NSDictionary *annotation in visibleAnnotations) {
+        double seconds = [annotation[@"seconds"] doubleValue];
 
         CGFloat x = plotRect.origin.x + (CGFloat)(seconds / self.duration) * plotRect.size.width;
         NSBezierPath *line = [NSBezierPath bezierPath];
         [line moveToPoint:NSMakePoint(x, plotRect.origin.y)];
-        [line lineToPoint:NSMakePoint(x, NSMaxY(plotRect))];
+        [line lineToPoint:NSMakePoint(x, NSMaxY(plotRect) + 4.0)];
         line.lineWidth = 1.0;
         CGFloat dash[] = {4.0, 3.0};
         [line setLineDash:dash count:2 phase:0.0];
-        [[NSColor systemRedColor] setStroke];
+        [annotationColor setStroke];
         [line stroke];
 
-        NSString *label = annotation[@"label"] ?: @"event";
-        [label drawInRect:NSMakeRect(x + 3, plotRect.origin.y + 2, 110, 14)
+        NSString *sourceLabel = annotation[@"label"] ?: @"event";
+        NSString *sourceType = annotation[@"type"] ?: @"";
+        NSString *label = sourceLabel;
+        if ([sourceType isEqualToString:@"yes"] || [sourceLabel isEqualToString:@"yes"]) {
+            label = @"Y";
+        } else if ([sourceType isEqualToString:@"no"] || [sourceLabel isEqualToString:@"no"]) {
+            label = @"N";
+        } else if ([sourceType isEqualToString:@"allow_permission"] || [sourceLabel isEqualToString:@"allow permission"]) {
+            label = @"P";
+        } else if ([sourceType hasPrefix:@"talk"] || [sourceLabel hasPrefix:@"talk"]) {
+            label = @"T";
+        }
+        CGFloat measuredWidth = [label sizeWithAttributes:annotationAttributes].width + 10.0;
+        CGFloat labelWidth = MIN(MAX(measuredWidth, 18.0), 24.0);
+        CGFloat preferredX = MIN(MAX(x - labelWidth * 0.5, plotRect.origin.x), maxLabelRight - labelWidth);
+        CGFloat labelX = MAX(preferredX, labelRightEdge + labelGap);
+        if (labelX + labelWidth > maxLabelRight) {
+            continue;
+        }
+
+        [label drawInRect:NSMakeRect(labelX, labelBandY, labelWidth, 14.0)
            withAttributes:annotationAttributes];
+        labelRightEdge = labelX + labelWidth;
     }
 
     NSString *durationText = [NSString stringWithFormat:@"%.1fs", self.duration];
-    [durationText drawInRect:NSMakeRect(NSMaxX(plotRect) - 56, NSMaxY(plotRect) + 5, 56, 16)
+    [durationText drawInRect:NSMakeRect(NSMaxX(plotRect) - 56, self.bounds.size.height - 20.0, 56, 16)
               withAttributes:labelAttributes];
 }
 
